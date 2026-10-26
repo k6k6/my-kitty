@@ -321,6 +321,13 @@ Detailed list of changes
   :code:`kitty.fast_data_types`, and :code:`set_enabled_sprite_faces()` can turn
   off the builtin ones, to use the glyphs from the font instead
 
+- Render the shade characters ░▒▓ as solid blocks of gray at 33%, 66% and 100%
+  opacity instead of a dither pattern, and render braille patterns as a gapless
+  2x4 bitmap instead of a grid of separated dots. This makes progress bars,
+  borders and other UI elements built out of these characters look like clean
+  solid areas rather than a noisy texture. The three shades are still
+  distinguishable, and a fully set braille pattern is now a solid block
+
 - :ref:`mouse_map <conf-kitty-mouse.mousemap>` can now map the scroll wheel, via
   the :code:`wheel_up`, :code:`wheel_down`, :code:`wheel_left` and
   :code:`wheel_right` buttons, for example, to change the font size with

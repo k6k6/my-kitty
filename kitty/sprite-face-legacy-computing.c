@@ -17,9 +17,23 @@
     SB(ch, corner_triangle(c, corner));                                                  \
     memcpy(ss->mask, canvas->mask, sizeof(canvas->mask[0]) * canvas->width * canvas->height); \
     fill_canvas(canvas, 0);                                                             \
-    shade(canvas, (Shade){.xnum = 12});                                                 \
+    fill_canvas(canvas, SHADE_MEDIUM_ALPHA);                                            \
     apply_mask(canvas, ss->mask);                                                        \
     break;
+
+// Fills the whole canvas, or the half of it given by edge, with the given alpha
+static void
+fill_half(Canvas *c, Edge edge, uint8_t alpha) {
+    uint x_start = 0, y_start = 0, x_end = c->width, y_end = c->height;
+    switch (edge) {
+        case TOP_EDGE: y_end = c->height / 2; break;
+        case BOTTOM_EDGE: y_start = c->height / 2; break;
+        case LEFT_EDGE: x_end = c->width / 2; break;
+        case RIGHT_EDGE: x_start = c->width / 2; break;
+        default: break;
+    }
+    fill_rect_alpha(c, x_start, y_start, x_end, y_end, alpha);
+}
 
 #define DL(x1, y1, x2, y2) diagonal_line(c, 1, x1, y1, x2, y2)
 
@@ -44,15 +58,19 @@ sprite_face_draw_legacy_computing(char_type ch, Canvas *canvas, Canvas *ss) {
     Canvas *c = canvas;
     START_ALLOW_CASE_RANGE
     switch (ch) {
-        SH(L'🮌', .xnum = 12, .which_half = LEFT_EDGE);
-        SH(L'🮍', .xnum = 12, .which_half = RIGHT_EDGE);
-        SH(L'🮎', .xnum = 12, .which_half = TOP_EDGE);
-        SH(L'🮏', .xnum = 12, .which_half = BOTTOM_EDGE);
-        SH(L'🮐', .xnum = 12, .invert = true);
-        SH(L'🮑', .xnum = 12, .invert = true, .fill_blank = true, .which_half = BOTTOM_EDGE);
-        SH(L'🮒', .xnum = 12, .invert = true, .fill_blank = true, .which_half = TOP_EDGE);
-        SH(L'🮓', .xnum = 12, .invert = true, .fill_blank = true, .which_half = RIGHT_EDGE);
-        SH(L'🮔', .xnum = 12, .invert = true, .fill_blank = true, .which_half = LEFT_EDGE);
+        // The medium shade is a flat gray (see SHADE_MEDIUM_ALPHA in
+        // sprite-canvas.h), so the half shades, the inverse shade (which is the
+        // same gray, there being no dither pattern to invert) and the glyphs that
+        // mix a half block with a half shade are all just one or two rectangles.
+        CC(L'🮌', fill_half(c, LEFT_EDGE, SHADE_MEDIUM_ALPHA));
+        CC(L'🮍', fill_half(c, RIGHT_EDGE, SHADE_MEDIUM_ALPHA));
+        CC(L'🮎', fill_half(c, TOP_EDGE, SHADE_MEDIUM_ALPHA));
+        CC(L'🮏', fill_half(c, BOTTOM_EDGE, SHADE_MEDIUM_ALPHA));
+        CC(L'🮐', fill_canvas(c, SHADE_MEDIUM_ALPHA));
+        CC(L'🮑', fill_half(c, TOP_EDGE, 255); fill_half(c, BOTTOM_EDGE, SHADE_MEDIUM_ALPHA));
+        CC(L'🮒', fill_half(c, TOP_EDGE, SHADE_MEDIUM_ALPHA); fill_half(c, BOTTOM_EDGE, 255));
+        CC(L'🮓', fill_half(c, LEFT_EDGE, 255); fill_half(c, RIGHT_EDGE, SHADE_MEDIUM_ALPHA));
+        CC(L'🮔', fill_half(c, LEFT_EDGE, SHADE_MEDIUM_ALPHA); fill_half(c, RIGHT_EDGE, 255));
         SH(L'🮕', .xnum = 4, .ynum = 4);
         SH(L'🮖', .xnum = 4, .ynum = 4, .invert = true);
         SH(L'🮗', .xnum = 1, .ynum = 4, .invert = true);

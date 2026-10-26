@@ -516,6 +516,49 @@ class Rendering(FontBaseTest):
         self.ae(num, NUM_OF_SPRITE_CHARS)
         self.ae(h.hexdigest(), SPRITE_CHARS_HASH)
 
+    def test_shades_are_solid(self):
+        # The shade characters must be a uniform block of gray, not a dither
+        # pattern, see SHADE_*_ALPHA in sprite-canvas.h
+        for cp, alpha in ((0x2591, 85), (0x2592, 170), (0x2593, 255)):
+            for width, height in ((8, 16), (10, 22), (13, 27)):
+                data = render_box_char(cp, width, height)
+                self.ae(set(data), {alpha}, f'U+{cp:x} is not a uniform block of alpha {alpha}')
+        # The medium shade glyphs of the symbols for legacy computing must use
+        # the same gray, in whole or half cell amounts
+        for cp, expected in (
+            (0x1fb8c, {0, 170}),
+            (0x1fb8d, {0, 170}),
+            (0x1fb8e, {0, 170}),
+            (0x1fb8f, {0, 170}),
+            (0x1fb90, {170}),
+            (0x1fb91, {170, 255}),
+            (0x1fb92, {170, 255}),
+            (0x1fb93, {170, 255}),
+            (0x1fb94, {170, 255}),
+        ):
+            self.ae(set(render_box_char(cp, 8, 16)), expected, f'U+{cp:x} does not use the medium shade gray')
+
+    def test_braille_dots_have_no_gaps(self):
+        width, height = 10, 20
+        # A fully set braille character is a solid block
+        self.ae(set(render_box_char(0x28FF, width, height)), {255})
+        # And the dots tile the cell, so any set of dots covers exactly the
+        # expected fraction of the cell with no gaps in between
+        for cp in range(0x2801, 0x2900):
+            bits = cp - 0x2800
+            num_dots = bin(bits).count('1')
+            data = render_box_char(cp, width, height)
+            self.assertTrue(set(data) <= {0, 255}, f'U+{cp:x} has partial coverage')
+            covered = sum(1 for x in data if x) / (width * height)
+            self.assertAlmostEqual(covered, num_dots / 8, places=6, msg=f'U+{cp:x} does not cover {num_dots}/8 of the cell')
+        # Adjacent dots must touch, which means the boundary between the two dot
+        # columns and the four dot rows is fully covered
+        data = render_box_char(0x28FF, width, height)
+        self.assertTrue(all(data[y * width + width // 2 - 1] for y in range(height)), 'gap between the dot columns')
+        for row in range(1, 4):
+            y = row * height // 4
+            self.assertTrue(all(data[y * width + x] for x in range(width)), f'gap between dot rows at y={y}')
+
     def test_custom_sprite_face(self):
         calls = []
 
@@ -1656,4 +1699,4 @@ LEGITIMATELY_BLANK = frozenset({0x2800})
 # The number of codepoints drawn by the sprite faces and a hash of their
 # rendered bitmaps, see Rendering.test_all_sprite_chars_render
 NUM_OF_SPRITE_CHARS = 1112
-SPRITE_CHARS_HASH = 'f5569087bfeeb4b0a075239567eb32f6e360430556558139b70f1bc9b4d52543'
+SPRITE_CHARS_HASH = 'c4d37ec6d5ccbea993a4b90feaa16846d52e1e77545691301976fe519adfdb0d'

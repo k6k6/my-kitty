@@ -1838,17 +1838,11 @@ void dpip(Canvas *self, uint level, Edge which) {
 
 void braille_dot(Canvas *self, uint col, uint row) {
     static const uint num_x_dots = 2, num_y_dots = 4;
-    unsigned x_gaps[num_x_dots * 2], y_gaps[num_y_dots * 2];
-    unsigned dot_width = distribute_dots(self->width, num_x_dots, x_gaps, x_gaps + num_x_dots);
-    unsigned dot_height = distribute_dots(self->height, num_y_dots, y_gaps, y_gaps + num_y_dots);
-    uint x_start = x_gaps[col] + col * dot_width;
-    uint y_start = y_gaps[row] + row * dot_height;
-    if (y_start < self->height && x_start < self->width) {
-        for (uint y = y_start; y < min(self->height, y_start + dot_height); y++) {
-            uint offset = y * self->width;
-            memset(self->mask + offset + x_start, 255, minus(min(self->width, x_start + dot_width), x_start));
-        }
-    }
+    if (col >= num_x_dots || row >= num_y_dots) return;
+    // The dots tile the cell exactly, with no gaps between them, so that a
+    // braille character looks like a solid bitmap, with a fully set character
+    // being a solid block, instead of a collection of separated dots.
+    fill_rect(self, col * self->width / num_x_dots, row * self->height / num_y_dots, (col + 1) * self->width / num_x_dots, (row + 1) * self->height / num_y_dots);
 }
 
 
@@ -1878,14 +1872,18 @@ void braille(Canvas *self, uint8_t which) {
     }
 }
 
-void fill_rect(Canvas *self, uint x_start, uint y_start, uint x_end, uint y_end) {
+void fill_rect_alpha(Canvas *self, uint x_start, uint y_start, uint x_end, uint y_end, uint8_t alpha) {
     if (x_end > self->width) x_end = self->width;
     if (y_end > self->height) y_end = self->height;
+    if (x_start > x_end) x_start = x_end;
+    if (y_start > y_end) y_start = y_end;
     for (uint y = y_start; y < y_end; y++) {
         uint off = y * self->width;
-        memset(self->mask + off + x_start, 255, x_end - x_start);
+        memset(self->mask + off + x_start, alpha, x_end - x_start);
     }
 }
+
+void fill_rect(Canvas *self, uint x_start, uint y_start, uint x_end, uint y_end) { fill_rect_alpha(self, x_start, y_start, x_end, y_end, 255); }
 
 void draw_separated_block(Canvas *self, uint num_cols, uint num_rows, uint which) {
     // Each "separated" block is drawn with a small gap around it.

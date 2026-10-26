@@ -15,8 +15,6 @@
 
 #define EV(ch, ...) C(ch, eight_block, false, __VA_ARGS__, -1);
 
-#define SH(ch, ...) C(ch, shade, (Shade){__VA_ARGS__});
-
 
 const SpriteRangeDef sprite_face_ranges_block[] = {
     {0x2580, 0x259f},
@@ -50,9 +48,11 @@ sprite_face_draw_block(char_type ch, Canvas *canvas, Canvas *ss) {
         EV(L'▏', 0);
         EV(L'▕', 7);
         EV(L'▐', 4, 5, 6, 7);
-        SH(L'░', .xnum = 12, .light = true);
-        SH(L'▒', .xnum = 12);
-        SH(L'▓', .xnum = 12, .light = true, .invert = true);
+        // The shade characters are rendered as uniform blocks of gray, see
+        // SHADE_*_ALPHA in sprite-canvas.h
+        C(L'░', fill_canvas, SHADE_LIGHT_ALPHA);
+        C(L'▒', fill_canvas, SHADE_MEDIUM_ALPHA);
+        C(L'▓', fill_canvas, SHADE_DARK_ALPHA);
         C(L'▖', quad, BOTTOM_LEFT);
         C(L'▗', quad, BOTTOM_RIGHT);
         C(L'▘', quad, TOP_LEFT);

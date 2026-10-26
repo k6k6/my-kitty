@@ -102,6 +102,14 @@ typedef struct Shade {
     uint xnum, ynum;
 } Shade;
 
+// The three shade characters (░▒▓) are not drawn as the dither pattern of the
+// font, instead the whole cell is filled with a single alpha value. This makes
+// them look like solid blocks of color when used to build progress bars and
+// other UI elements, instead of having a visible noise texture, and keeps the
+// three levels distinguishable. The values are the alpha (0...255) that
+// corresponds to each of the three shades.
+enum { SHADE_LIGHT_ALPHA = 85, SHADE_MEDIUM_ALPHA = 170, SHADE_DARK_ALPHA = 255 };
+
 // The mask is followed in memory by space for a supersampled canvas, see
 // sprite_canvas_supersampled(). All the space for both is owned by the caller.
 static inline Canvas
@@ -218,6 +226,7 @@ void dpip(Canvas *self, uint level, Edge which);
 void braille_dot(Canvas *self, uint col, uint row);
 void braille(Canvas *self, uint8_t which);
 void fill_rect(Canvas *self, uint x_start, uint y_start, uint x_end, uint y_end);
+void fill_rect_alpha(Canvas *self, uint x_start, uint y_start, uint x_end, uint y_end, uint8_t alpha);
 void fill_triangle(Canvas *self, FloatPoint a, FloatPoint b, FloatPoint c);
 void draw_separated_block(Canvas *self, uint num_cols, uint num_rows, uint which);
 void sixteenth_block(Canvas *self, uint pos);
