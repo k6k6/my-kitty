@@ -16,9 +16,15 @@ from kitty.fast_data_types import (
     DECAWM,
     ParsedFontFeature,
     Screen,
+    add_sprite_face,
     get_fallback_font,
+    is_sprite_char,
+    remove_sprite_face,
+    render_box_char,
     render_decoration,
     set_allow_use_of_box_fonts,
+    set_enabled_sprite_faces,
+    sprite_faces,
     sprite_idx_to_pos,
     sprite_map_set_layout,
     sprite_map_set_limits,
@@ -457,6 +463,119 @@ class Rendering(FontBaseTest):
         block_test(quarter_block, scale=1, subscale_n=1, subscale_d=2)
         block_test(upper_half_block, scale=1, subscale_n=1, subscale_d=2, text='██')
         block_test(lower_half_block, scale=1, subscale_n=1, subscale_d=2, text='██', vertical_align=1)
+
+    def test_sprite_face_registry(self):
+        faces = sprite_faces()
+        names = [f['name'] for f in faces]
+        self.ae(len(names), len(set(names)), 'sprite face names must be unique')
+        expected = {
+            'box',
+            'block',
+            'braille',
+            'branch',
+            'geometric_shapes',
+            'powerline',
+            'progress',
+            'legacy_computing',
+            'legacy_computing_supplement',
+            'special',
+        }
+        self.ae(set(names), expected)
+        # The ranges of the faces must not overlap and must be looked up correctly
+        all_ranges = sorted((lo, hi, f['name']) for f in faces if not f['is_special'] for lo, hi in f['ranges'])
+        for (lo1, hi1, name1), (lo2, hi2, name2) in zip(all_ranges, all_ranges[1:]):
+            self.assertGreater(lo2, hi1, f'The ranges of {name1} and {name2} overlap')
+        for lo, hi, name in all_ranges:
+            self.assertTrue(is_sprite_char(lo), f'{lo:x} is the start of a range of {name} but is not a sprite char')
+            self.assertTrue(is_sprite_char(hi), f'{hi:x} is the end of a range of {name} but is not a sprite char')
+        self.assertFalse(is_sprite_char(0x41), 'plain ASCII should not be drawn by a sprite face')
+        self.assertFalse(is_sprite_char(0xFFFFFFFF), 'invalid codepoints should not be drawn by a sprite face')
+
+    def test_all_sprite_chars_render(self):
+        # Every codepoint handled by a face must produce something and the output
+        # must not change, the hash below is a regression test for the drawing
+        # routines of all the faces, it needs to be updated only when a glyph is
+        # intentionally changed.
+        import hashlib
+
+        # Fixed dimensions so that the hash does not depend on the fonts
+        # available on the machine
+        width, height = 10, 20
+        h = hashlib.sha256()
+        num = 0
+        for f in sprite_faces():
+            if f['is_special']:
+                continue
+            for lo, hi in f['ranges']:
+                for cp in range(lo, hi + 1):
+                    data = render_box_char(cp, width, height)
+                    if cp not in LEGITIMATELY_BLANK:
+                        self.assertGreater(sum(data), 0, f'U+{cp:x} of sprite face {f["name"]} rendered as blank')
+                    h.update(data)
+                    num += 1
+        self.ae(num, NUM_OF_SPRITE_CHARS)
+        self.ae(h.hexdigest(), SPRITE_CHARS_HASH)
+
+    def test_custom_sprite_face(self):
+        calls = []
+
+        def draw(cp, width, height, dpi_x, dpi_y, scale):
+            calls.append((cp, width, height))
+            return b'\xff' * (width * height)
+
+        self.assertFalse(is_sprite_char(0x1F700))
+        add_sprite_face('test-face', [(0x1F700, 0x1F701)], draw)
+        try:
+            self.assertTrue(is_sprite_char(0x1F700))
+            self.assertTrue(is_sprite_char(0x1F701))
+            data = render_box_char(0x1F700, 8, 16)
+            self.ae(data, b'\xff' * 128)
+            # and through the full text rendering pipeline, which goes via the
+            # sprite cache of the font group
+            num_calls = len(calls)
+            _, _, cells = render_string('\U0001f700\U0001f700')
+            self.ae(len(cells), 2)
+            for cell in cells:
+                self.ae(set(cell), {0xFF}, 'the cell must be filled by the custom face')
+                self.ae(calls[-1][2] * calls[-1][1] <= len(cell), True)
+            # The sprite is cached per font group so the second identical glyph
+            # does not invoke the callback again
+            self.ae(len(calls), num_calls + 1)
+            # A bad callback must not crash kitty
+            for ret in (b'', b'\xff' * 3, 42):
+                add_sprite_face('bad-face', [(0x1F702, 0x1F702)], lambda *a, ret=ret: ret)
+                try:
+                    self.ae(render_box_char(0x1F702, 8, 16), b'\0' * 128)
+                finally:
+                    remove_sprite_face('bad-face')
+        finally:
+            remove_sprite_face('test-face')
+        self.assertFalse(is_sprite_char(0x1F700))
+        with self.assertRaises(KeyError):
+            remove_sprite_face('test-face')
+        add_sprite_face('test-face', [(0x1F700, 0x1F700)], draw)
+        try:
+            with self.assertRaises(ValueError):
+                add_sprite_face('test-face', [(0x1F701, 0x1F701)], draw)
+        finally:
+            remove_sprite_face('test-face')
+
+    def test_disable_sprite_faces(self):
+        try:
+            set_enabled_sprite_faces([])
+            self.assertFalse(is_sprite_char(0x2500))
+            # Disabled faces fall back to the regular font lookup, which cannot
+            # draw box drawing characters, so we get nothing, but no crash
+            render_string('\u2500\u2588\u2800')
+            set_enabled_sprite_faces(['box'])
+            self.assertTrue(is_sprite_char(0x2500))
+            self.assertFalse(is_sprite_char(0x2588), 'only the box face should be enabled')
+            with self.assertRaises(KeyError):
+                set_enabled_sprite_faces(['box', 'no-such-face'])
+        finally:
+            set_enabled_sprite_faces([f['name'] for f in sprite_faces()])
+        self.assertTrue(is_sprite_char(0x2500))
+        self.assertTrue(is_sprite_char(0x2588))
 
     def test_font_rendering(self):
         render_string('ab\u0347\u0305你好|\U0001f601|\U0001f64f|\U0001f63a|')
@@ -1529,3 +1648,12 @@ for ch in range(0x1CE16, 0x1CE1A):  # box drawings light vertical T-junctions (s
     box_chars.add(chr(ch))
 for ch in range(0x1CE51, 0x1CEB0):  # separated block sextants, sixteenth blocks, quarter parts (supplement)
     box_chars.add(chr(ch))
+
+
+# Sprites that are blank by definition, U+2800 is BRAILLE PATTERN BLANK
+LEGITIMATELY_BLANK = frozenset({0x2800})
+
+# The number of codepoints drawn by the sprite faces and a hash of their
+# rendered bitmaps, see Rendering.test_all_sprite_chars_render
+NUM_OF_SPRITE_CHARS = 1112
+SPRITE_CHARS_HASH = 'f5569087bfeeb4b0a075239567eb32f6e360430556558139b70f1bc9b4d52543'

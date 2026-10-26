@@ -7,6 +7,7 @@
  */
 
 #include "fonts.h"
+#include "sprite-face.h"
 #include "pyport.h"
 #include "charsets.h"
 #include "state.h"
@@ -17,7 +18,6 @@
 #include "print-graphics.h"
 #include "simd-string.h"
 
-#define MISSING_GLYPH 1
 #define MAX_NUM_EXTRA_GLYPHS_PUA 4u
 
 #define debug debug_fonts
@@ -76,12 +76,12 @@ typedef struct {
     SpacerStrategy spacer_strategy;
 } Font;
 
-typedef struct Canvas {
+typedef struct FontGroupCanvas {
     pixel *buf;
     uint8_t *alpha_mask;
     unsigned current_cells, alloced_cells, alloced_scale, current_scale;
     size_t size_in_bytes, alpha_mask_sz_in_bytes;
-} Canvas;
+} FontGroupCanvas;
 
 #define NAME fallback_font_map_t
 #define KEY_TY const char *
@@ -140,7 +140,7 @@ typedef struct {
     size_t fonts_capacity, fonts_count, fallback_fonts_count;
     ssize_t medium_font_idx, bold_font_idx, italic_font_idx, bi_font_idx, first_symbol_font_idx, first_fallback_font_idx;
     Font *fonts;
-    Canvas canvas;
+    FontGroupCanvas canvas;
     GPUSpriteTracker sprite_tracker;
     fallback_font_map_t fallback_font_map;
     scaled_font_map_t scaled_font_map;
@@ -152,6 +152,8 @@ static size_t font_groups_capacity = 0;
 static size_t num_font_groups = 0;
 static id_type font_group_id_counter = 0;
 static void initialize_font_group(FontGroup *fg);
+static void render_sprite_for_cell(
+    char_type ch, uint8_t *buf, unsigned width, unsigned height, const FontCellMetrics *fcm, double dpi_x, double dpi_y, double scale);
 
 static void
 display_glyph(const pixel *b, unsigned width, unsigned height) {
@@ -256,7 +258,7 @@ static void
 del_font_group(FontGroup *fg) {
     free(fg->canvas.buf);
     free(fg->canvas.alpha_mask);
-    fg->canvas = (Canvas){0};
+    fg->canvas = (FontGroupCanvas){0};
     free_sprite_data((FONTS_DATA_HANDLE)fg);
     vt_cleanup(&fg->fallback_font_map);
     vt_cleanup(&fg->scaled_font_map);
@@ -850,78 +852,39 @@ font_for_cell(
     *is_main_font = false;
     *is_emoji_presentation = false;
     text_in_cell(cpu_cell, tc, lc);
-    START_ALLOW_CASE_RANGE
-    ssize_t ans;
     switch (lc->chars[0]) {
         case 0:
         case '\t':
         case IMAGE_PLACEHOLDER_CHAR: return BLANK_FONT;
-        case 0x2500 ... 0x2573:
-        case 0x2574 ... 0x259f:
-        case 0x25d6 ... 0x25d7:
-        case 0x25cb:
-        case 0x25c9:
-        case 0x25cf:
-        case 0x25dc ... 0x25e5:
-        case 0x2800 ... 0x28ff:
-        case 0xe0b0 ... 0xe0bf:
-        case 0xe0d6 ... 0xe0d7:   // powerline box drawing
-        case 0xee00 ... 0xee0b:   // fira code progress bar/spinner
-        case 0x1fb00 ... 0x1fbae: // symbols for legacy computing
-        case 0x1fbce ... 0x1fbef: // blocks, diagonals, circles (legacy computing)
-        case 0x1cd00 ... 0x1cde5: // octants
-        case 0x1cc1b ... 0x1cc2f: // box drawing variants, double diagonals, separated block quadrants (supplement)
-        case 0x1cc30 ... 0x1cc3f: // twelfth and quarter circle arcs (supplement)
-        case 0x1ce16 ... 0x1ce19: // box drawings light vertical T-junctions (supplement)
-        case 0x1ce51 ... 0x1ceaf: // separated block sextants, sixteenth blocks, quarter parts (supplement)
-        case 0xf5d0 ... 0xf60d:   // branch drawing characters
-            if (allow_use_of_box_fonts) return BOX_FONT;
-            /* fallthrough */
-        default:
-            // Optimisation to avoid rendering spaces, except in the case of
-            // scaled multicells as the decorations there have to rendered
-            // scaled as well.
-            if (lc->count == 1 && (lc->chars[0] == ' ' || lc->chars[0] == 0x2002 /* en-space */) && (!cpu_cell->is_multicell || cpu_cell->scale == 1))
-                return BLANK_FONT;
-            *is_emoji_presentation = has_emoji_presentation(cpu_cell, lc);
-            ans = in_symbol_maps(fg, lc->chars[0]);
-            if (ans > -1) return ans;
-            switch (gpu_cell->attrs.bold | (gpu_cell->attrs.italic << 1)) {
-                case 0: ans = fg->medium_font_idx; break;
-                case 1: ans = fg->bold_font_idx; break;
-                case 2: ans = fg->italic_font_idx; break;
-                case 3: ans = fg->bi_font_idx; break;
-            }
-            if (ans < 0) ans = fg->medium_font_idx;
-            if (!*is_emoji_presentation && has_cell_text((bool (*)(const void *, char_type))face_has_codepoint, (fg->fonts + ans)->face, false, lc)) {
-                *is_main_font = true;
-                return ans;
-            }
-            return fallback_font(fg, cpu_cell, gpu_cell, lc);
+        default: break;
     }
-    END_ALLOW_CASE_RANGE
+    // Characters that have a hard coded drawing routine (box drawing, blocks,
+    // braille, powerline, legacy computing, ...) are drawn by a sprite face
+    // instead of a font, see kitty/sprite-face.h
+    if (allow_use_of_box_fonts && is_sprite_char(lc->chars[0])) return BOX_FONT;
+    ssize_t ans;
+    // Optimisation to avoid rendering spaces, except in the case of
+    // scaled multicells as the decorations there have to rendered
+    // scaled as well.
+    if (lc->count == 1 && (lc->chars[0] == ' ' || lc->chars[0] == 0x2002 /* en-space */) && (!cpu_cell->is_multicell || cpu_cell->scale == 1))
+        return BLANK_FONT;
+    *is_emoji_presentation = has_emoji_presentation(cpu_cell, lc);
+    ans = in_symbol_maps(fg, lc->chars[0]);
+    if (ans > -1) return ans;
+    switch (gpu_cell->attrs.bold | (gpu_cell->attrs.italic << 1)) {
+        case 0: ans = fg->medium_font_idx; break;
+        case 1: ans = fg->bold_font_idx; break;
+        case 2: ans = fg->italic_font_idx; break;
+        case 3: ans = fg->bi_font_idx; break;
+    }
+    if (ans < 0) ans = fg->medium_font_idx;
+    if (!*is_emoji_presentation && has_cell_text((bool (*)(const void *, char_type))face_has_codepoint, (fg->fonts + ans)->face, false, lc)) {
+        *is_main_font = true;
+        return ans;
+    }
+    return fallback_font(fg, cpu_cell, gpu_cell, lc);
 }
 
-// Gives a unique (arbitrary) id to a box glyph
-static glyph_index
-box_glyph_id(char_type ch) {
-    START_ALLOW_CASE_RANGE
-    switch (ch) {
-        case 0x2500 ... 0x25ff: return ch - 0x2500;             // IDs from 0x00 to 0xff
-        case 0xe0b0 ... 0xee0b: return 0x100 + ch - 0xe0b0;     // IDs from 0x100 to 0xe5b
-        case 0x2800 ... 0x28ff: return 0xf00 + ch - 0x2800;     // IDs from 0xf00 to 0xfff
-        case 0x1fb00 ... 0x1fbae: return 0x1000 + ch - 0x1fb00; // IDs from 0x1000 to 0x10ae
-        case 0x1fbce ... 0x1fbef: return 0x10af + ch - 0x1fbce; // IDs from 0x10af to 0x10e0 (34 chars)
-        case 0x1cd00 ... 0x1cde5: return 0x1100 + ch - 0x1cd00; // IDs from 0x1100 to 0x11e5
-        case 0x1cc1b ... 0x1cc2f: return 0x11e8 + ch - 0x1cc1b; // IDs from 0x11e8 to 0x11fc (21 chars)
-        case 0x1cc30 ... 0x1cc3f: return 0x11fd + ch - 0x1cc30; // IDs from 0x11fd to 0x120c (16 chars)
-        case 0x1ce16 ... 0x1ce19: return 0x120d + ch - 0x1ce16; // IDs from 0x120d to 0x1210 (4 chars)
-        case 0x1ce51 ... 0x1ceaf: return 0x1211 + ch - 0x1ce51; // IDs from 0x1211 to 0x126e (95 chars)
-        case 0xf5d0 ... 0xf60d: return 0x2000 + ch - 0xf5d0;    // IDs from 0x2000 to 0x203d
-        default: return 0xffff;
-    }
-    END_ALLOW_CASE_RANGE
-}
 
 static PyObject *descriptor_for_idx = NULL;
 
@@ -1026,7 +989,7 @@ apply_scale_to_font_group(FontGroup *fg, RunFont *rf) {
 }
 
 static pixel *
-pointer_to_space_for_last_sprite(Canvas *canvas, FontCellMetrics fcm, unsigned *sz) {
+pointer_to_space_for_last_sprite(FontGroupCanvas *canvas, FontCellMetrics fcm, unsigned *sz) {
     *sz = fcm.cell_width * (fcm.cell_height + 1);
     return canvas->buf + (canvas->size_in_bytes / sizeof(canvas->buf[0]) - *sz);
 }
@@ -1073,7 +1036,7 @@ calculate_regions_for_line(RunFont rf, unsigned cell_height, Region *src, Region
 }
 
 static pixel *
-extract_cell_region(Canvas *canvas, unsigned i, Region *src, const Region *dest, unsigned src_width, FontCellMetrics unscaled_metrics) {
+extract_cell_region(FontGroupCanvas *canvas, unsigned i, Region *src, const Region *dest, unsigned src_width, FontCellMetrics unscaled_metrics) {
     src->left = i * unscaled_metrics.cell_width;
     src->right = MIN(src_width, src->left + unscaled_metrics.cell_width);
     unsigned sz;
@@ -1184,7 +1147,7 @@ render_box_cell(FontGroup *fg, RunFont rf, CPUCell *cpu_cell, GPUCell *gpu_cell,
     ensure_glyph_render_scratch_space(rf.scale * global_glyph_render_scratch.lc->count);
     unsigned num_glyphs = 0, num_cells = rf.scale;
     for (unsigned i = 0; i < global_glyph_render_scratch.lc->count; i++) {
-        glyph_index glyph = box_glyph_id(global_glyph_render_scratch.lc->chars[i]);
+        glyph_index glyph = sprite_face_glyph_id_for_char(global_glyph_render_scratch.lc->chars[i]);
         if (glyph != 0xffff) global_glyph_render_scratch.glyphs[num_glyphs++] = glyph;
         else global_glyph_render_scratch.lc->chars[i] = 0;
     }
@@ -1228,7 +1191,7 @@ render_box_cell(FontGroup *fg, RunFont rf, CPUCell *cpu_cell, GPUCell *gpu_cell,
     for (unsigned i = 0, cnum = 0; i < num_glyphs; i++) {
         unsigned int ch = global_glyph_render_scratch.lc->chars[cnum++];
         while (!ch) ch = global_glyph_render_scratch.lc->chars[cnum++];
-        render_box_char(ch, fg->canvas.alpha_mask, src.right, src.bottom, fg->logical_dpi_x, fg->logical_dpi_y, scale * line_scale);
+        render_sprite_for_cell(ch, fg->canvas.alpha_mask, src.right, src.bottom, &scaled_metrics, fg->logical_dpi_x, fg->logical_dpi_y, scale * line_scale);
         dest.left = i * scaled_metrics.cell_width + right_shift;
         dest.right = dest.left + scaled_metrics.cell_width;
         render_alpha_mask(fg->canvas.alpha_mask, fg->canvas.buf, &src, &dest, src.right, mask_stride, 0xffffff);
@@ -2191,7 +2154,7 @@ render_run(
             break;
         case MISSING_FONT:
             while (num_cells--) {
-                first_gpu_cell->sprite_idx = MISSING_GLYPH;
+                first_gpu_cell->sprite_idx = SPRITE_IDX_MISSING_GLYPH;
                 first_cpu_cell++;
                 first_gpu_cell++;
             }
@@ -2413,37 +2376,46 @@ set_font_data(PyObject UNUSED *m, PyObject *args) {
     Py_RETURN_NONE;
 }
 
+// Renders the hard coded glyphs (box drawing, blocks, braille, ...) for a single
+// cell, see render_sprite_char() in sprite-face.c
+static void
+render_sprite_for_cell(
+    char_type ch, uint8_t *buf, unsigned width, unsigned height, const FontCellMetrics *fcm, double dpi_x, double dpi_y, double scale) {
+    Canvas canvas = sprite_canvas(buf, width, height, dpi_x, dpi_y, scale);
+    canvas.fcm = *fcm;
+    Canvas ss = sprite_canvas_supersampled(&canvas);
+    render_sprite_char(ch, &canvas, &ss);
+    sprite_canvas_free_scratch(&canvas);
+    sprite_canvas_free_scratch(&ss);
+}
+
+// The sprites that are always present in the sprite texture have fixed indices,
+// see SPRITE_IDX_* in sprite-face.h. These indices are part of the interface with
+// the shaders (which use sprite 0 for the block cursor) and with the code that
+// sets cursor_fg_sprite_idx in the GPU cell data, so do not reorder them.
 static void
 send_prerendered_sprites(FontGroup *fg) {
     // blank cell
     ensure_canvas_can_fit(fg, 1, 1);
-    DecorationMetadata dm = {.start_idx = 5};
+    DecorationMetadata dm = {.start_idx = NUM_OF_SPECIAL_SPRITES};
     current_send_sprite_to_gpu(fg, fg->canvas.buf, dm, fg->fcm);
     const unsigned cell_area = fg->fcm.cell_height * fg->fcm.cell_width;
     RAII_ALLOC(uint8_t, alpha_mask, malloc(cell_area));
     if (!alpha_mask) fatal("Out of memory");
     Region r = {.right = fg->fcm.cell_width, .bottom = fg->fcm.cell_height};
-#define do_one(call)                                                                                         \
-    memset(alpha_mask, 0, cell_area);                                                                        \
-    call;                                                                                                    \
-    ensure_canvas_can_fit(fg, 1, 1); /* clear canvas */                                                      \
-    render_alpha_mask(alpha_mask, fg->canvas.buf, &r, &r, fg->fcm.cell_width, fg->fcm.cell_width, 0xffffff); \
-    current_send_sprite_to_gpu(fg, fg->canvas.buf, dm, fg->fcm);
-
-    // If you change the mapping of these cells you will need to change
-    // BEAM_IDX in shader.c and STRIKE_SPRITE_INDEX in
-    // shaders.py and MISSING_GLYPH in font.c and dec_idx above
-    do_one(add_missing_glyph(alpha_mask, fg->fcm));
     const double line_scale = line_thickness_scale_for_font_size((FONTS_DATA_HANDLE)fg);
-    do_one(add_beam_cursor(alpha_mask, fg->fcm, fg->logical_dpi_x, line_scale));
-    do_one(add_underline_cursor(alpha_mask, fg->fcm, fg->logical_dpi_y, line_scale));
-    do_one(add_hollow_cursor(alpha_mask, fg->fcm, fg->logical_dpi_x, fg->logical_dpi_y, line_scale));
+    Canvas canvas = sprite_canvas(alpha_mask, fg->fcm.cell_width, fg->fcm.cell_height, fg->logical_dpi_x, fg->logical_dpi_y, line_scale);
+    canvas.fcm = fg->fcm;
+    for (glyph_index idx = SPRITE_IDX_MISSING_GLYPH; idx < NUM_OF_SPECIAL_SPRITES; idx++) {
+        if (!sprite_face_render_special(idx, &canvas)) fatal("Failed to render the special sprite: %u", idx);
+        ensure_canvas_can_fit(fg, 1, 1); // clear canvas
+        render_alpha_mask(alpha_mask, fg->canvas.buf, &r, &r, fg->fcm.cell_width, fg->fcm.cell_width, 0xffffff);
+        current_send_sprite_to_gpu(fg, fg->canvas.buf, dm, fg->fcm);
+    }
     RunFont rf = {.scale = 1};
     Region rg = {.bottom = fg->fcm.cell_height, .right = fg->fcm.cell_width};
     sprite_index actual_dec_idx = index_for_decorations(fg, rf, rg, rg, fg->fcm).start_idx;
     if (actual_dec_idx != dm.start_idx) fatal("dec_idx: %u != actual_dec_idx: %u", dm.start_idx, actual_dec_idx);
-
-#undef do_one
 }
 
 static size_t
@@ -2529,6 +2501,7 @@ load_fonts_data(double font_sz_in_pts, double dpi_x, double dpi_y) {
 static void
 finalize(void) {
     Py_CLEAR(python_send_to_gpu_impl);
+    sprite_faces_cleanup();
     clear_symbol_maps();
     Py_CLEAR(descriptor_for_idx);
     free_font_groups();
@@ -2896,6 +2869,36 @@ sprite_idx_to_pos(PyObject *self UNUSED, PyObject *args) {
 }
 
 static PyObject *
+pysprite_faces(PyObject *self UNUSED, PyObject *args UNUSED) {
+    return sprite_faces_as_python();
+}
+
+static PyObject *
+pyadd_sprite_face(PyObject *self UNUSED, PyObject *args) {
+    PyObject *name, *ranges, *draw;
+    if (!PyArg_ParseTuple(args, "OOO", &name, &ranges, &draw)) return NULL;
+    return add_python_sprite_face(name, ranges, draw);
+}
+
+static PyObject *
+pyremove_sprite_face(PyObject *self UNUSED, PyObject *name) {
+    return remove_sprite_face(name);
+}
+
+static PyObject *
+pyset_enabled_sprite_faces(PyObject *self UNUSED, PyObject *names) {
+    return set_enabled_sprite_faces(names);
+}
+
+static PyObject *
+pyis_sprite_char(PyObject *self UNUSED, PyObject *args) {
+    unsigned int ch;
+    if (!PyArg_ParseTuple(args, "I", &ch)) return NULL;
+    if (is_sprite_char(ch)) Py_RETURN_TRUE;
+    Py_RETURN_FALSE;
+}
+
+static PyObject *
 pyrender_box_char(PyObject *self UNUSED, PyObject *args) {
     unsigned int ch;
     unsigned long width, height;
@@ -2926,11 +2929,17 @@ static PyMethodDef module_methods[] = {
     METHODB(get_fallback_font, METH_VARARGS),
     {"specialize_font_descriptor", (PyCFunction)pyspecialize_font_descriptor, METH_VARARGS, ""},
     {"render_box_char", (PyCFunction)pyrender_box_char, METH_VARARGS, ""},
+    {"sprite_faces", (PyCFunction)pysprite_faces, METH_NOARGS, ""},
+    {"add_sprite_face", (PyCFunction)pyadd_sprite_face, METH_VARARGS, ""},
+    {"remove_sprite_face", (PyCFunction)pyremove_sprite_face, METH_O, ""},
+    {"set_enabled_sprite_faces", (PyCFunction)pyset_enabled_sprite_faces, METH_O, ""},
+    {"is_sprite_char", (PyCFunction)pyis_sprite_char, METH_VARARGS, ""},
     {NULL, NULL, 0, NULL} /* Sentinel */
 };
 
 bool
 init_fonts(PyObject *module) {
+    sprite_faces_init();
     harfbuzz_buffer = hb_buffer_create();
     if (harfbuzz_buffer == NULL || !hb_buffer_allocation_successful(harfbuzz_buffer) || !hb_buffer_pre_allocate(harfbuzz_buffer, 2048)) {
         PyErr_NoMemory();

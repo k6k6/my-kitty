@@ -307,6 +307,20 @@ Detailed list of changes
   or too thick when zoomed out. At the configured :opt:`font_size` nothing
   changes (:iss:`10362`)
 
+- Draw more characters ourselves instead of leaving them to the font: the white
+  corner triangles (U+25F8–U+25FA and U+25FF), the thick powerline separators
+  (U+E0D2, U+E0D4), the negative diagonal and quadrant glyphs (U+1FBAF,
+  U+1FBBD–U+1FBBF) and the circle and ellipse outlines of the Symbols for Legacy
+  Computing Supplement (U+1CE00, U+1CE01, U+1CE0B, U+1CE0C). The code that draws
+  hard coded glyphs has also been restructured into self contained
+  :italic:`sprite faces` (``kitty/sprite-face*.c``), modeled on the equivalent
+  feature in ghostty. Faces are looked up by codepoint in a sorted table, so
+  adding a new range of glyphs no longer requires touching three separate switch
+  statements. User defined faces can be registered with the new
+  :code:`add_sprite_face()` and :code:`remove_sprite_face()` functions in
+  :code:`kitty.fast_data_types`, and :code:`set_enabled_sprite_faces()` can turn
+  off the builtin ones, to use the glyphs from the font instead
+
 - :ref:`mouse_map <conf-kitty-mouse.mousemap>` can now map the scroll wheel, via
   the :code:`wheel_up`, :code:`wheel_down`, :code:`wheel_left` and
   :code:`wheel_right` buttons, for example, to change the font size with

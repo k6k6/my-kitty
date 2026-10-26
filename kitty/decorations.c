@@ -6,9 +6,10 @@
  */
 
 #include "decorations.h"
+#include "sprite-canvas.h"
+#include "sprite-face.h"
 #include "state.h"
 
-typedef uint32_t uint;
 
 static uint
 max(uint a, uint b) {
@@ -239,65 +240,36 @@ add_hollow_cursor(uint8_t *buf, FontCellMetrics fcm, double dpi_x, double dpi_y,
 
 // }}}
 
-typedef struct Range {
-    uint start, end;
-} Range;
 
-typedef struct Limit {
-    double upper, lower;
-} Limit;
-typedef struct FloatPoint {
-    double x, y;
-} FloatPoint;
-
-typedef struct Canvas {
-    uint8_t *mask;
-    uint width, height, supersample_factor;
-    struct {
-        double x, y;
-    } dpi;
-    double scale; // used to scale line thickness with font size changes and for multicell rendering
-    Range *holes;
-    uint holes_count, holes_capacity;
-    Limit *y_limits;
-    uint y_limits_count, y_limits_capacity;
-} Canvas;
-
-static void
-fill_canvas(Canvas *self, int byte) {
+void fill_canvas(Canvas *self, int byte) {
     memset(self->mask, byte, sizeof(self->mask[0]) * self->width * self->height);
 }
 
-static void
-append_hole(Canvas *self, Range hole) {
+void append_hole(Canvas *self, Range hole) {
     ensure_space_for(self, holes, self->holes[0], self->holes_count + 1, holes_capacity, self->width, false);
     self->holes[self->holes_count++] = hole;
 }
 
-static void
-append_limit(Canvas *self, double upper, double lower) {
+void append_limit(Canvas *self, double upper, double lower) {
     ensure_space_for(self, y_limits, self->y_limits[0], self->y_limits_count + 1, y_limits_capacity, self->width, false);
     self->y_limits[self->y_limits_count].upper = upper;
     self->y_limits[self->y_limits_count++].lower = lower;
 }
 
-static double
-thickness_as_float(Canvas *self, uint level, bool horizontal) {
+double thickness_as_float(Canvas *self, uint level, bool horizontal) {
     level = min(level, arraysz(OPT(box_drawing_scale)));
     double pts = OPT(box_drawing_scale)[level];
     double dpi = horizontal ? self->dpi.x : self->dpi.y;
     return self->supersample_factor * self->scale * pts * dpi / 72.0;
 }
 
-static uint
-thickness(Canvas *self, uint level, bool horizontal) {
+uint thickness(Canvas *self, uint level, bool horizontal) {
     return (uint)ceil(thickness_as_float(self, level, horizontal));
 }
 
 static const uint hole_factor = 8;
 
-static void
-get_holes(Canvas *self, uint sz, uint hole_sz, uint num) {
+void get_holes(Canvas *self, uint sz, uint hole_sz, uint num) {
     uint all_holes_use = (num + 1) * hole_sz;
     uint individual_block_size = max(1u, minus(sz, all_holes_use) / (num + 1));
     uint half_hole_sz = hole_sz / 2;
@@ -310,8 +282,7 @@ get_holes(Canvas *self, uint sz, uint hole_sz, uint num) {
     }
 }
 
-static void
-add_hholes(Canvas *self, uint level, uint num) {
+void add_hholes(Canvas *self, uint level, uint num) {
     uint line_sz = thickness(self, level, true);
     uint hole_sz = self->width / hole_factor;
     uint start = minus(self->height / 2, line_sz / 2);
@@ -322,8 +293,7 @@ add_hholes(Canvas *self, uint level, uint num) {
     }
 }
 
-static void
-add_vholes(Canvas *self, uint level, uint num) {
+void add_vholes(Canvas *self, uint level, uint num) {
     uint line_sz = thickness(self, level, false);
     uint hole_sz = self->height / hole_factor;
     uint start = minus(self->width / 2, line_sz / 2);
@@ -336,16 +306,14 @@ add_vholes(Canvas *self, uint level, uint num) {
     }
 }
 
-static Range
-hline_limits(Canvas *self, uint y, uint level) {
+Range hline_limits(Canvas *self, uint y, uint level) {
     uint sz = thickness(self, level, false);
     Range r = {.start = minus(y, sz / 2)};
     r.end = min(r.start + sz, self->height);
     return r;
 }
 
-static void
-draw_hline(Canvas *self, uint x1, uint x2, uint y, uint level) {
+void draw_hline(Canvas *self, uint x1, uint x2, uint y, uint level) {
     // Draw a horizontal line between [x1, x2) centered at y with the thickness given by level and self->supersample_factor
     Range r = hline_limits(self, y, level);
     for (uint y = r.start; y < r.end; y++) {
@@ -354,16 +322,14 @@ draw_hline(Canvas *self, uint x1, uint x2, uint y, uint level) {
     }
 }
 
-static Range
-vline_limits(Canvas *self, uint x, uint level) {
+Range vline_limits(Canvas *self, uint x, uint level) {
     uint sz = thickness(self, level, true);
     Range r = {.start = minus(x, sz / 2)};
     r.end = min(r.start + sz, self->width);
     return r;
 }
 
-static void
-draw_vline(Canvas *self, uint y1, uint y2, uint x, uint level) {
+void draw_vline(Canvas *self, uint y1, uint y2, uint x, uint level) {
     // Draw a vertical line between [y1, y2) centered at x with the thickness given by level and self->supersample_factor
     Range r = vline_limits(self, x, level);
     uint xsz = minus(r.end, r.start);
@@ -373,30 +339,25 @@ draw_vline(Canvas *self, uint y1, uint y2, uint x, uint level) {
     }
 }
 
-static uint
-half_width(Canvas *self) { // align with non-supersampled co-ords
+uint half_width(Canvas *self) { // align with non-supersampled co-ords
     return self->supersample_factor * (self->width / 2 / self->supersample_factor);
 }
 
-static uint
-half_height(Canvas *self) { // align with non-supersampled co-ords
+uint half_height(Canvas *self) { // align with non-supersampled co-ords
     return self->supersample_factor * (self->height / 2 / self->supersample_factor);
 }
 
-static double
-unit_double(double x) {
+double unit_double(double x) {
     return x < 0.0 ? 0.0 : (x > 1.0 ? 1.0 : x);
 }
 
-static double
-smoothstep(double edge0, double edge1, double x) {
+double smoothstep(double edge0, double edge1, double x) {
     if (edge0 == edge1) return x < edge0 ? 0.0 : 1.0;
     double t = unit_double((x - edge0) / (edge1 - edge0));
     return t * t * (3.0 - 2.0 * t);
 }
 
-static void
-half_hline(Canvas *self, uint level, bool right_half, uint extend_by) {
+void half_hline(Canvas *self, uint level, bool right_half, uint extend_by) {
     uint x1, x2;
     if (right_half) {
         x1 = minus(half_width(self), extend_by);
@@ -408,16 +369,9 @@ half_hline(Canvas *self, uint level, bool right_half, uint extend_by) {
     draw_hline(self, x1, x2, half_height(self), level);
 }
 
-typedef union Point {
-    struct {
-        int32_t x : 32, y : 32;
-    };
-    int64_t val;
-} Point;
 
 
-static Point
-half_dhline(Canvas *self, uint level, bool right_half, Edge which) {
+Point half_dhline(Canvas *self, uint level, bool right_half, Edge which) {
     uint x1 = 0, x2 = 0;
     if (right_half) {
         x1 = self->width / 2;
@@ -430,8 +384,7 @@ half_dhline(Canvas *self, uint level, bool right_half, Edge which) {
     return ans;
 }
 
-static Point
-half_dvline(Canvas *self, uint level, bool bottom_half, Edge which) {
+Point half_dvline(Canvas *self, uint level, bool bottom_half, Edge which) {
     uint y1 = 0, y2 = 0;
     if (bottom_half) {
         y1 = self->height / 2;
@@ -444,21 +397,18 @@ half_dvline(Canvas *self, uint level, bool bottom_half, Edge which) {
     return ans;
 }
 
-static Point
-dhline(Canvas *self, uint level, Edge which) {
+Point dhline(Canvas *self, uint level, Edge which) {
     half_dhline(self, level, false, which);
     return half_dhline(self, level, true, which);
 }
 
-static Point
-dvline(Canvas *self, uint level, Edge which) {
+Point dvline(Canvas *self, uint level, Edge which) {
     half_dvline(self, level, false, which);
     return half_dvline(self, level, true, which);
 }
 
 
-static void
-half_vline(Canvas *self, uint level, bool bottom_half, uint extend_by) {
+void half_vline(Canvas *self, uint level, bool bottom_half, uint extend_by) {
     uint y1, y2;
     if (bottom_half) {
         y1 = minus(half_height(self), extend_by);
@@ -470,39 +420,33 @@ half_vline(Canvas *self, uint level, bool bottom_half, uint extend_by) {
     draw_vline(self, y1, y2, half_width(self), level);
 }
 
-static void
-hline(Canvas *self, uint level) {
+void hline(Canvas *self, uint level) {
     half_hline(self, level, false, 0);
     half_hline(self, level, true, 0);
 }
 
-static void
-vline(Canvas *self, uint level) {
+void vline(Canvas *self, uint level) {
     half_vline(self, level, false, 0);
     half_vline(self, level, true, 0);
 }
 
-static void
-hholes(Canvas *self, uint level, uint num) {
+void hholes(Canvas *self, uint level, uint num) {
     hline(self, level);
     add_hholes(self, level, num);
 }
 
-static void
-vholes(Canvas *self, uint level, uint num) {
+void vholes(Canvas *self, uint level, uint num) {
     vline(self, level);
     add_vholes(self, level, num);
 }
 
-static uint8_t
-plus(uint8_t a, uint8_t b) {
+uint8_t plus(uint8_t a, uint8_t b) {
     uint8_t res = a + b;
     res |= -(res < a);
     return res;
 }
 
-static uint8_t
-average_intensity(const Canvas *src, uint dest_x, uint dest_y) {
+uint8_t average_intensity(const Canvas *src, uint dest_x, uint dest_y) {
     uint src_x = dest_x * src->supersample_factor, src_y = dest_y * src->supersample_factor;
     uint total = 0;
     for (uint y = src_y; y < src_y + src->supersample_factor; y++) {
@@ -512,28 +456,58 @@ average_intensity(const Canvas *src, uint dest_x, uint dest_y) {
     return (total / (src->supersample_factor * src->supersample_factor)) & 0xff;
 }
 
-static void
-downsample(const Canvas *src, Canvas *dest) {
+void downsample(const Canvas *src, Canvas *dest) {
     for (uint y = 0; y < dest->height; y++) {
         uint offset = dest->width * y;
         for (uint x = 0; x < dest->width; x++) { dest->mask[offset + x] = plus(dest->mask[offset + x], average_intensity(src, x, y)); }
     }
 }
 
-typedef struct StraightLine {
-    double m, c;
-} StraightLine;
+// Turns the canvas into its supersampled companion, which draws into the space
+// immediately following the canvas in memory, see sprite_canvas_supersampled()
+// in sprite-canvas.h
+Canvas
+sprite_canvas_supersampled(Canvas *canvas) {
+    Canvas ss = *canvas;
+    ss.mask = canvas->mask + (size_t)canvas->width * canvas->height;
+    ss.supersample_factor = SUPERSAMPLE_FACTOR;
+    ss.width = canvas->width * SUPERSAMPLE_FACTOR;
+    ss.height = canvas->height * SUPERSAMPLE_FACTOR;
+    ss.holes = NULL;
+    ss.holes_count = ss.holes_capacity = 0;
+    ss.y_limits = NULL;
+    ss.y_limits_count = ss.y_limits_capacity = 0;
+    return ss;
+}
+
+void
+sprite_canvas_free_scratch(Canvas *canvas) {
+    if (!canvas) return;
+    free(canvas->holes);
+    free(canvas->y_limits);
+    canvas->holes = NULL;
+    canvas->y_limits = NULL;
+    canvas->holes_count = canvas->holes_capacity = 0;
+    canvas->y_limits_count = canvas->y_limits_capacity = 0;
+}
+
+// Invert the mask, used to draw the "negative" versions of glyphs, where the
+// gaps between the drawn lines are filled and the lines themselves are empty.
+void
+invert_mask(Canvas *self) {
+    const size_t sz = (size_t)self->width * self->height;
+    for (size_t i = 0; i < sz; i++) self->mask[i] = 255 - self->mask[i];
+}
 
 
-static StraightLine
-line_from_points(double x1, double y1, double x2, double y2) {
+
+StraightLine line_from_points(double x1, double y1, double x2, double y2) {
     StraightLine ans = {.m = (y2 - y1) / (x2 - x1)};
     ans.c = y1 - ans.m * x1;
     return ans;
 }
 
-static double
-line_y(StraightLine l, int x) {
+double line_y(StraightLine l, int x) {
     return l.m * x + l.c;
 }
 
@@ -550,8 +524,7 @@ line_y(StraightLine l, int x) {
         }                                                                              \
     }
 
-static void
-fill_region(Canvas *self, bool inverted) {
+void fill_region(Canvas *self, bool inverted) {
     uint8_t full = 0, empty = 0;
     if (inverted) empty = 255;
     else full = 255;
@@ -563,8 +536,7 @@ fill_region(Canvas *self, bool inverted) {
     }
 }
 
-static void
-triangle(Canvas *self, bool left, bool inverted) {
+void triangle(Canvas *self, bool left, bool inverted) {
     int ay1 = 0, by1 = self->height - 1, y2 = self->height / 2, x1 = 0, x2 = 0;
     if (left) x2 = self->width - 1;
     else x1 = self->width - 1;
@@ -574,15 +546,8 @@ triangle(Canvas *self, bool left, bool inverted) {
     fill_region(self, inverted);
 }
 
-typedef enum Corner {
-    TOP_LEFT = LEFT_EDGE | TOP_EDGE,
-    TOP_RIGHT = TOP_EDGE | RIGHT_EDGE,
-    BOTTOM_LEFT = BOTTOM_EDGE | LEFT_EDGE,
-    BOTTOM_RIGHT = BOTTOM_EDGE | RIGHT_EDGE,
-} Corner;
 
-static void
-thick_line(Canvas *self, uint thickness_in_pixels, Point p1, Point p2) {
+void thick_line(Canvas *self, uint thickness_in_pixels, Point p1, Point p2) {
     if (p1.x > p2.x) SWAP(p1, p2);
     StraightLine l = line_from_points(p1.x, p1.y, p2.x, p2.y);
     div_t d = div(thickness_in_pixels, 2);
@@ -593,8 +558,29 @@ thick_line(Canvas *self, uint thickness_in_pixels, Point p1, Point p2) {
     }
 }
 
-static void
-frame(Canvas *self, uint level, Edge edges) {
+// Filled triangle, no anti-aliasing. The vertices are in canvas coords, which
+// need not be inside the canvas, the result is clipped to it.
+void fill_triangle(Canvas *self, FloatPoint a, FloatPoint b, FloatPoint c) {
+    const double minx = fmin(a.x, fmin(b.x, c.x)), maxx = fmax(a.x, fmax(b.x, c.x));
+    const double miny = fmin(a.y, fmin(b.y, c.y)), maxy = fmax(a.y, fmax(b.y, c.y));
+    int x1 = (int)floor(minx), x2 = (int)ceil(maxx), y1 = (int)floor(miny), y2 = (int)ceil(maxy);
+    x1 = MAX(0, x1);
+    y1 = MAX(0, y1);
+    x2 = MIN((int)self->width - 1, x2);
+    y2 = MIN((int)self->height - 1, y2);
+    for (int y = y1; y <= y2; y++) {
+        for (int x = x1; x <= x2; x++) {
+            const double px = x + 0.5, py = y + 0.5;
+            const double d1 = (px - b.x) * (a.y - b.y) - (a.x - b.x) * (py - b.y);
+            const double d2 = (px - c.x) * (b.y - c.y) - (b.x - c.x) * (py - c.y);
+            const double d3 = (px - a.x) * (c.y - a.y) - (c.x - a.x) * (py - a.y);
+            const bool has_negative = d1 < 0 || d2 < 0 || d3 < 0, has_positive = d1 > 0 || d2 > 0 || d3 > 0;
+            if (!(has_negative && has_positive)) self->mask[x + y * self->width] = 255;
+        }
+    }
+}
+
+void frame(Canvas *self, uint level, Edge edges) {
     uint h = thickness(self, level, true), v = thickness(self, level, false);
 #define line(x1, x2, y1, y2)                                                                                                               \
     {                                                                                                                                      \
@@ -611,10 +597,8 @@ frame(Canvas *self, uint level, Edge edges) {
 #undef line
 }
 
-typedef enum Segment { LEFT, MIDDLE, RIGHT } Segment;
 
-static void
-progress_bar(Canvas *self, Segment which, bool filled) {
+void progress_bar(Canvas *self, Segment which, bool filled) {
     const Edge edges = TOP_EDGE | BOTTOM_EDGE;
     switch (which) {
         case LEFT: frame(self, 1, LEFT_EDGE | edges); break;
@@ -641,8 +625,7 @@ progress_bar(Canvas *self, Segment which, bool filled) {
 // thickness is therefore (thickness/2) / sqrt(1 + m²). Multiply the nominal
 // thickness by sqrt(1 + m²) so the visual weight matches that of horizontal
 // and vertical lines of the same specified thickness.
-static uint
-diagonal_thickness(uint base, Point p1, Point p2) {
+uint diagonal_thickness(uint base, Point p1, Point p2) {
     int dx = (int)p2.x - (int)p1.x;
     if (dx == 0) return base;
     // m is squared below so its sign does not matter; no need for abs(dx).
@@ -651,8 +634,7 @@ diagonal_thickness(uint base, Point p1, Point p2) {
     return ans > 0 ? ans : 1;
 }
 
-static void
-half_cross_line(Canvas *self, uint level, Corner corner) {
+void half_cross_line(Canvas *self, uint level, Corner corner) {
     uint my = minus(self->height, 1) / 2;
     Point p1 = {0}, p2 = {0};
     switch (corner) {
@@ -677,8 +659,7 @@ half_cross_line(Canvas *self, uint level, Corner corner) {
     thick_line(self, diagonal_thickness(thickness(self, level, true), p1, p2), p1, p2);
 }
 
-static void
-cross_line(Canvas *self, uint level, bool left) {
+void cross_line(Canvas *self, uint level, bool left) {
     uint w = minus(self->width, 1), h = minus(self->height, 1);
     Point p1 = {0}, p2 = {0};
     if (left) p2 = (Point){.x = w, .y = h};
@@ -689,9 +670,6 @@ cross_line(Canvas *self, uint level, bool left) {
     thick_line(self, diagonal_thickness(thickness(self, level, true), p1, p2), p1, p2);
 }
 
-typedef struct CubicBezier {
-    Point start, c1, c2, end;
-} CubicBezier;
 
 #define bezier_eq(which)                                                                                        \
     {                                                                                                           \
@@ -711,27 +689,22 @@ typedef struct CubicBezier {
         return 3 * u_2 * (cb->c1.which - cb->start.which) + 6 * t * u * (cb->c2.which - cb->c1.which) + 3 * t_2 * (cb->end.which - cb->c2.which); \
     }
 
-static double
-bezier_x(const void *v, double t) {
+double bezier_x(const void *v, double t) {
     bezier_eq(x);
 }
-static double
-bezier_y(const void *v, double t) {
+double bezier_y(const void *v, double t) {
     bezier_eq(y);
 }
-static double
-bezier_prime_x(const void *v, double t) {
+double bezier_prime_x(const void *v, double t) {
     bezier_prime_eq(x);
 }
-static double
-bezier_prime_y(const void *v, double t) {
+double bezier_prime_y(const void *v, double t) {
     bezier_prime_eq(y);
 }
 #undef bezier_eq
 #undef bezier_prime_eq
 
-static int
-find_bezier_for_D(int width, int height) {
+int find_bezier_for_D(int width, int height) {
     int cx = width - 1, last_cx = cx;
     CubicBezier cb = {.end = {.x = 0, .y = height - 1}, .c2 = {.x = 0, .y = height - 1}};
     while (true) {
@@ -742,8 +715,7 @@ find_bezier_for_D(int width, int height) {
     }
 }
 
-static double
-find_t_for_x(const CubicBezier *cb, int x, double start_t) {
+double find_t_for_x(const CubicBezier *cb, int x, double start_t) {
     if (fabs(bezier_x(cb, start_t) - x) < 0.1) return start_t;
     static const double t_limit = 0.5;
     double increment = t_limit - start_t;
@@ -766,8 +738,7 @@ find_t_for_x(const CubicBezier *cb, int x, double start_t) {
 }
 
 
-static void
-get_bezier_limits(Canvas *self, const CubicBezier *cb) {
+void get_bezier_limits(Canvas *self, const CubicBezier *cb) {
     int start_x = (int)bezier_x(cb, 0), max_x = (int)bezier_x(cb, 0.5);
     double last_t = 0.;
     for (int x = start_x; x < max_x + 1; x++) {
@@ -795,8 +766,7 @@ get_bezier_limits(Canvas *self, const CubicBezier *cb) {
         }                                                             \
     }
 
-static void
-filled_D(Canvas *self, bool left) {
+void filled_D(Canvas *self, bool left) {
     int c1x = find_bezier_for_D(self->width, self->height);
     CubicBezier cb = {.end = {.y = self->height - 1}, .c1 = {.x = c1x}, .c2 = {.x = c1x, .y = self->height - 1}};
     get_bezier_limits(self, &cb);
@@ -804,30 +774,23 @@ filled_D(Canvas *self, bool left) {
     else mirror_horizontally(fill_region(self, false));
 }
 
-typedef double (*curve_func)(const void *, double t);
 
 #define NAME position_set
 #define KEY_TY Point
 #define HASH_FN hash_point
 #define CMPR_FN cmpr_point
-static uint64_t hash_point(Point p);
-static bool cmpr_point(Point, Point);
+uint64_t hash_point(Point p);
+bool cmpr_point(Point, Point);
 #include "kitty-verstable.h"
-static uint64_t
-hash_point(Point p) {
+uint64_t hash_point(Point p) {
     return vt_hash_integer(p.val);
 }
-static bool
-cmpr_point(Point a, Point b) {
+bool cmpr_point(Point a, Point b) {
     return a.val == b.val;
 }
 
-typedef struct ClipRect {
-    uint left, top, x_end, y_end;
-} ClipRect;
 
-static void
-draw_parametrized_curve_with_derivative_and_antialiasing(
+void draw_parametrized_curve_with_derivative_and_antialiasing(
     Canvas *self,
     void *curve_data,
     double line_width,
@@ -898,8 +861,7 @@ draw_parametrized_curve_with_derivative_and_antialiasing(
     }
 }
 
-static void
-rounded_separator(Canvas *self, uint level, bool left) {
+void rounded_separator(Canvas *self, uint level, bool left) {
     uint gap = thickness(self, level, true);
     int c1x = find_bezier_for_D(minus(self->width, gap), minus(self->height, gap));
     uint half_gap = gap / 2;
@@ -914,8 +876,7 @@ rounded_separator(Canvas *self, uint level, bool left) {
 #undef d
 }
 
-static void
-corner_triangle(Canvas *self, const Corner corner) {
+void corner_triangle(Canvas *self, const Corner corner) {
     StraightLine diag;
     const uint w = minus(self->width, 1), h = minus(self->height, 1);
     bool top = corner == TOP_RIGHT || corner == TOP_LEFT;
@@ -928,76 +889,57 @@ corner_triangle(Canvas *self, const Corner corner) {
     fill_region(self, false);
 }
 
-typedef struct Circle {
-    double x, y, radius;
-    double start, end, amt;
-} Circle;
 
-static Circle
-circle(double x, double y, double radius, double start_at, double end_at) {
+Circle circle(double x, double y, double radius, double start_at, double end_at) {
     double conv = M_PI / 180.;
     Circle ans = {.x = x, .y = y, .radius = radius, .start = start_at * conv, .end = end_at * conv};
     ans.amt = ans.end - ans.start;
     return ans;
 }
 
-static double
-circle_x(const void *v, double t) {
+double circle_x(const void *v, double t) {
     const Circle *c = v;
     return c->x + c->radius * cos(c->start + c->amt * t);
 }
-static double
-circle_y(const void *v, double t) {
+double circle_y(const void *v, double t) {
     const Circle *c = v;
     return c->y + c->radius * sin(c->start + c->amt * t);
 }
-static double
-circle_prime_x(const void *v, double t) {
+double circle_prime_x(const void *v, double t) {
     const Circle *c = v;
     return -c->radius * sin(c->start + c->amt * t);
 }
-static double
-circle_prime_y(const void *v, double t) {
+double circle_prime_y(const void *v, double t) {
     const Circle *c = v;
     return c->radius * cos(c->start + c->amt * t);
 }
 
-typedef struct Ellipse {
-    double x, y, rx, ry;
-    double start, end, amt;
-} Ellipse;
 
-static Ellipse
-ellipse(double x, double y, double rx, double ry, double start_at, double end_at) {
+Ellipse ellipse(double x, double y, double rx, double ry, double start_at, double end_at) {
     double conv = M_PI / 180.;
     Ellipse ans = {.x = x, .y = y, .rx = rx, .ry = ry, .start = start_at * conv, .end = end_at * conv};
     ans.amt = ans.end - ans.start;
     return ans;
 }
 
-static double
-ellipse_x(const void *v, double t) {
+double ellipse_x(const void *v, double t) {
     const Ellipse *e = v;
     return e->x + e->rx * cos(e->start + e->amt * t);
 }
-static double
-ellipse_y(const void *v, double t) {
+double ellipse_y(const void *v, double t) {
     const Ellipse *e = v;
     return e->y + e->ry * sin(e->start + e->amt * t);
 }
-static double
-ellipse_prime_x(const void *v, double t) {
+double ellipse_prime_x(const void *v, double t) {
     const Ellipse *e = v;
     return -e->rx * sin(e->start + e->amt * t);
 }
-static double
-ellipse_prime_y(const void *v, double t) {
+double ellipse_prime_y(const void *v, double t) {
     const Ellipse *e = v;
     return e->ry * cos(e->start + e->amt * t);
 }
 
-static void
-spinner(Canvas *self, uint level, double start_degrees, double end_degrees) {
+void spinner(Canvas *self, uint level, double start_degrees, double end_degrees) {
     double x = self->width / 2.0, y = self->height / 2.0;
     double line_width = thickness_as_float(self, level, true);
     double half_real_line_width = fmax(0.5, line_width / 2.0);
@@ -1008,8 +950,7 @@ spinner(Canvas *self, uint level, double start_degrees, double end_degrees) {
     draw_parametrized_curve_with_derivative_and_antialiasing(self, &c, line_width, circle_x, circle_y, circle_prime_x, circle_prime_y, 0, 0, &cr);
 }
 
-static void
-fill_circle_of_radius(Canvas *self, double origin_x, double origin_y, double radius, uint8_t alpha) {
+void fill_circle_of_radius(Canvas *self, double origin_x, double origin_y, double radius, uint8_t alpha) {
     const double limit = radius * radius;
     for (uint y = 0; y < self->height; y++) {
         for (uint x = 0; x < self->width; x++) {
@@ -1019,16 +960,14 @@ fill_circle_of_radius(Canvas *self, double origin_x, double origin_y, double rad
     }
 }
 
-static void
-fill_circle(Canvas *self, double scale, double gap, bool invert) {
+void fill_circle(Canvas *self, double scale, double gap, bool invert) {
     const uint w = self->width / 2, h = self->height / 2;
     const double radius = (int)(scale * min(w, h) - gap / 2);
     const uint8_t fill = invert ? 0 : 255;
     fill_circle_of_radius(self, w, h, radius, fill);
 }
 
-static void
-draw_fish_eye(Canvas *self, uint level UNUSED) {
+void draw_fish_eye(Canvas *self, uint level UNUSED) {
     double x = self->width / 2., y = self->height / 2.;
     double radius = fmin(x, y);
     uint leftover = minus(self->height, 2 * (uint)ceil(radius) + 1) / 2;
@@ -1041,8 +980,7 @@ draw_fish_eye(Canvas *self, uint level UNUSED) {
     draw_parametrized_curve_with_derivative_and_antialiasing(self, &c, line_width, circle_x, circle_y, circle_prime_x, circle_prime_y, 0, 0, &cr);
 }
 
-static void
-inner_corner(Canvas *self, uint level, Corner corner) {
+void inner_corner(Canvas *self, uint level, Corner corner) {
     uint hgap = thickness(self, level + 1, true), vgap = thickness(self, level + 1, false);
     uint vthick = thickness(self, level, true) / 2;
     uint x1 = 0, x2 = self->width, y1 = 0, y2 = self->height;
@@ -1060,8 +998,7 @@ inner_corner(Canvas *self, uint level, Corner corner) {
     draw_vline(self, y1, y2, self->width / 2 + (xd * hgap), level);
 }
 
-static Range
-fourth_range(uint size, uint which) {
+Range fourth_range(uint size, uint which) {
     uint thickness = max(1, size / 4);
     uint block = thickness * 4;
     if (block == size) return (Range){.start = thickness * which, .end = thickness * (which + 1)};
@@ -1089,8 +1026,7 @@ done:
 }
 
 
-static Range
-eight_range(uint size, uint which) {
+Range eight_range(uint size, uint which) {
     uint thickness = max(1, size / 8);
     uint block = thickness * 8;
     if (block == size) return (Range){.start = thickness * which, .end = thickness * (which + 1)};
@@ -1121,8 +1057,7 @@ done:
     return (Range){.start = pos, .end = pos + thicknesses[which]};
 }
 
-static void
-eight_bar(Canvas *self, uint which, bool horizontal) {
+void eight_bar(Canvas *self, uint which, bool horizontal) {
     Range x_range, y_range;
     if (horizontal) {
         x_range = (Range){0, self->width};
@@ -1138,8 +1073,7 @@ eight_bar(Canvas *self, uint which, bool horizontal) {
 }
 
 
-static void
-octant_segment(Canvas *self, uint8_t which, bool left) {
+void octant_segment(Canvas *self, uint8_t which, bool left) {
     Range x_range = left ? (Range){0, self->width / 2} : (Range){self->width / 2, self->width};
     Range y_range = fourth_range(self->height, which);
     for (uint y = y_range.start; y < y_range.end; y++) {
@@ -1148,8 +1082,7 @@ octant_segment(Canvas *self, uint8_t which, bool left) {
     }
 }
 
-static void
-octant(Canvas *self, uint8_t which) {
+void octant(Canvas *self, uint8_t which) {
     enum flags { a = 1, b = 2, c = 4, d = 8, m = 16, n = 32, o = 64, p = 128 };
     static const enum flags mapping[232] = {
         // 00 - 0f
@@ -1414,8 +1347,7 @@ octant(Canvas *self, uint8_t which) {
     if (which & p) octant_segment(self, 3, false);
 }
 
-static void
-eight_block(Canvas *self, int horizontal, ...) {
+void eight_block(Canvas *self, int horizontal, ...) {
     va_list args;
     va_start(args, horizontal);
     int which;
@@ -1423,16 +1355,10 @@ eight_block(Canvas *self, int horizontal, ...) {
     va_end(args);
 }
 
-typedef struct Shade {
-    bool light, invert, fill_blank;
-    Edge which_half;
-    uint xnum, ynum;
-} Shade;
 
 #define is_odd(x) ((x) & 1u)
 
-static void
-shade(Canvas *self, Shade s) {
+void shade(Canvas *self, Shade s) {
     const uint square_width = max(1, self->width / s.xnum);
     const uint square_height = max(1, s.ynum ? (self->height / s.ynum) : square_width);
     uint number_of_rows = self->height / square_height;
@@ -1547,8 +1473,7 @@ shade(Canvas *self, Shade s) {
     for (uint r = rows.start; r < rows.end; r++) memset(self->mask + r * self->width + cols.start, 255, cols.end - cols.start);
 }
 
-static void
-apply_mask(Canvas *self, uint8_t *mask) {
+void apply_mask(Canvas *self, uint8_t *mask) {
     for (uint y = 0; y < self->height; y++) {
         uint offset = y * self->width;
         for (uint x = 0; x < self->width; x++) {
@@ -1558,8 +1483,7 @@ apply_mask(Canvas *self, uint8_t *mask) {
     }
 }
 
-static void
-cross_shade(Canvas *self, bool rotate) {
+void cross_shade(Canvas *self, bool rotate) {
     static const uint num_of_lines = 7;
     uint line_thickness = max(self->supersample_factor, self->width / num_of_lines);
     uint delta = 2 * line_thickness;
@@ -1571,8 +1495,7 @@ cross_shade(Canvas *self, bool rotate) {
     }
 }
 
-static void
-quad(Canvas *self, Corner which) {
+void quad(Canvas *self, Corner which) {
     uint x = which & LEFT_EDGE ? 0 : 1, y = which & TOP_EDGE ? 0 : 1;
     uint num_cols = self->width / 2;
     uint left = x * num_cols;
@@ -1586,8 +1509,7 @@ quad(Canvas *self, Corner which) {
     }
 }
 
-static void
-quads(Canvas *self, ...) {
+void quads(Canvas *self, ...) {
     va_list args;
     va_start(args, self);
     int which;
@@ -1595,8 +1517,7 @@ quads(Canvas *self, ...) {
     va_end(args);
 }
 
-static void
-smooth_mosaic(Canvas *self, bool lower, double ax, double ay, double bx, double by) {
+void smooth_mosaic(Canvas *self, bool lower, double ax, double ay, double bx, double by) {
     StraightLine l = line_from_points(ax * minus(self->width, 1), ay * minus(self->height, 1), bx * minus(self->width, 1), by * minus(self->height, 1));
     for (uint y = 0; y < self->height; y++) {
         uint offset = y * self->width;
@@ -1607,8 +1528,7 @@ smooth_mosaic(Canvas *self, bool lower, double ax, double ay, double bx, double 
     }
 }
 
-static void
-half_triangle(Canvas *self, Edge which, bool inverted) {
+void half_triangle(Canvas *self, Edge which, bool inverted) {
     uint mid_x = self->width / 2, mid_y = self->height / 2;
     StraightLine u, l;
     append_limit(self, 0, 0); // ensure space for limits
@@ -1643,8 +1563,7 @@ half_triangle(Canvas *self, Edge which, bool inverted) {
 #undef set_limits
 }
 
-static void
-mid_lines(Canvas *self, uint level, ...) {
+void mid_lines(Canvas *self, uint level, ...) {
     uint mid_x = self->width / 2, mid_y = self->height / 2;
     const uint th = thickness(self, level, true);
     const Point l = {.x = 0, .y = mid_y}, t = {.x = mid_x, .y = 0}, r = {.x = minus(self->width, 1), .y = mid_y}, b = {.x = mid_x, .y = minus(self->height, 1)};
@@ -1676,8 +1595,7 @@ mid_lines(Canvas *self, uint level, ...) {
     va_end(args);
 }
 
-static Point *
-get_fading_lines(uint total_length, uint num, Edge fade) {
+Point * get_fading_lines(uint total_length, uint num, Edge fade) {
     uint step = total_length / num, d1 = 0;
     int dir = 1;
     if (fade == LEFT_EDGE || fade == TOP_EDGE) {
@@ -1703,8 +1621,7 @@ get_fading_lines(uint total_length, uint num, Edge fade) {
     return ans;
 }
 
-static void
-fading_hline(Canvas *self, uint level, uint num, Edge fade) {
+void fading_hline(Canvas *self, uint level, uint num, Edge fade) {
     uint y = self->height / 2;
     RAII_ALLOC(Point, pts, get_fading_lines(self->width, num, fade));
     for (uint i = 0; i < num; i++) {
@@ -1713,8 +1630,7 @@ fading_hline(Canvas *self, uint level, uint num, Edge fade) {
     }
 }
 
-static void
-fading_vline(Canvas *self, uint level, uint num, Edge fade) {
+void fading_vline(Canvas *self, uint level, uint num, Edge fade) {
     uint x = self->width / 2;
     RAII_ALLOC(Point, pts, get_fading_lines(self->height, num, fade));
     for (uint i = 0; i < num; i++) {
@@ -1723,8 +1639,7 @@ fading_vline(Canvas *self, uint level, uint num, Edge fade) {
     }
 }
 
-static void
-rounded_corner(Canvas *self, uint level, Corner which) {
+void rounded_corner(Canvas *self, uint level, Corner which) {
     // Render a rounded box corner.
     const Range hori_line_range = hline_limits(self, half_height(self), level);
     const Range vert_line_range = vline_limits(self, half_width(self), level);
@@ -1772,8 +1687,7 @@ rounded_corner(Canvas *self, uint level, Corner which) {
     }
 }
 
-static void
-commit(Canvas *self, Edge lines, bool solid) {
+void commit(Canvas *self, Edge lines, bool solid) {
     static const uint level = 1;
     static const double scale = 0.9;
     uint hw = half_width(self), hh = half_height(self);
@@ -1789,8 +1703,7 @@ commit(Canvas *self, Edge lines, bool solid) {
 #define t 1u
 #define f 3u
 
-static void
-corner(Canvas *self, uint hlevel, uint vlevel, Corner which) {
+void corner(Canvas *self, uint hlevel, uint vlevel, Corner which) {
     const uint v_thickness = thickness(self, vlevel, true);
 
     uint v_half_tickness;
@@ -1804,8 +1717,7 @@ corner(Canvas *self, uint hlevel, uint vlevel, Corner which) {
     half_vline(self, vlevel, which & BOTTOM_EDGE, 0);
 }
 
-static void
-cross(Canvas *self, uint which) {
+void cross(Canvas *self, uint which) {
     static const uint level_map[16][4] = {
         {t, t, t, t},
         {f, t, t, t},
@@ -1830,8 +1742,7 @@ cross(Canvas *self, uint which) {
     half_vline(self, m[3], true, 0);
 }
 
-static void
-vert_t(Canvas *self, uint base_char, uint variation) {
+void vert_t(Canvas *self, uint base_char, uint variation) {
     static const uint level_map[8][3] = {{t, t, t}, {t, f, t}, {f, t, t}, {t, t, f}, {f, t, f}, {f, f, t}, {t, f, f}, {f, f, f}};
     const uint *m = level_map[variation];
     half_vline(self, m[0], false, 0);
@@ -1839,8 +1750,7 @@ vert_t(Canvas *self, uint base_char, uint variation) {
     half_vline(self, m[2], true, 0);
 }
 
-static void
-horz_t(Canvas *self, uint base_char, uint variation) {
+void horz_t(Canvas *self, uint base_char, uint variation) {
     static const uint level_map[8][3] = {{t, t, t}, {f, t, t}, {t, f, t}, {f, f, t}, {t, t, f}, {f, t, f}, {t, f, f}, {f, f, f}};
     const uint *m = level_map[variation];
     half_hline(self, m[0], false, 0);
@@ -1848,8 +1758,7 @@ horz_t(Canvas *self, uint base_char, uint variation) {
     half_vline(self, m[2], base_char != L'┴', 0);
 }
 
-static void
-dvcorner(Canvas *self, uint level, Corner which) {
+void dvcorner(Canvas *self, uint level, Corner which) {
     Point dline_position = half_dhline(self, level, which & LEFT_EDGE, TOP_EDGE | BOTTOM_EDGE);
 
     if (which & BOTTOM_EDGE) {
@@ -1861,8 +1770,7 @@ dvcorner(Canvas *self, uint level, Corner which) {
     }
 }
 
-static void
-dhcorner(Canvas *self, uint level, Corner which) {
+void dhcorner(Canvas *self, uint level, Corner which) {
     Point dline_position = half_dvline(self, level, which & TOP_EDGE, LEFT_EDGE | RIGHT_EDGE);
 
     if (which & RIGHT_EDGE) {
@@ -1874,8 +1782,7 @@ dhcorner(Canvas *self, uint level, Corner which) {
     }
 }
 
-static void
-dcorner(Canvas *self, uint level, Corner which) {
+void dcorner(Canvas *self, uint level, Corner which) {
     uint hgap = thickness(self, level + 1, false);
     uint vgap = thickness(self, level + 1, true);
     uint x1 = self->width / 2, x2 = self->width / 2;
@@ -1904,8 +1811,7 @@ dcorner(Canvas *self, uint level, Corner which) {
 }
 
 
-static void
-dpip(Canvas *self, uint level, Edge which) {
+void dpip(Canvas *self, uint level, Edge which) {
     uint x1, x2, y1, y2;
     if (which & (LEFT_EDGE | RIGHT_EDGE)) {
         Point p = dvline(self, level, LEFT_EDGE | RIGHT_EDGE);
@@ -1930,8 +1836,7 @@ dpip(Canvas *self, uint level, Edge which) {
     }
 }
 
-static void
-braille_dot(Canvas *self, uint col, uint row) {
+void braille_dot(Canvas *self, uint col, uint row) {
     static const uint num_x_dots = 2, num_y_dots = 4;
     unsigned x_gaps[num_x_dots * 2], y_gaps[num_y_dots * 2];
     unsigned dot_width = distribute_dots(self->width, num_x_dots, x_gaps, x_gaps + num_x_dots);
@@ -1947,8 +1852,7 @@ braille_dot(Canvas *self, uint col, uint row) {
 }
 
 
-static void
-braille(Canvas *self, uint8_t which) {
+void braille(Canvas *self, uint8_t which) {
     if (!which) return;
     for (uint8_t i = 0, mask = 1; i < 8; i++, mask <<= 1) {
         if (which & mask) {
@@ -1974,8 +1878,7 @@ braille(Canvas *self, uint8_t which) {
     }
 }
 
-static void
-fill_rect(Canvas *self, uint x_start, uint y_start, uint x_end, uint y_end) {
+void fill_rect(Canvas *self, uint x_start, uint y_start, uint x_end, uint y_end) {
     if (x_end > self->width) x_end = self->width;
     if (y_end > self->height) y_end = self->height;
     for (uint y = y_start; y < y_end; y++) {
@@ -1984,8 +1887,7 @@ fill_rect(Canvas *self, uint x_start, uint y_start, uint x_end, uint y_end) {
     }
 }
 
-static void
-draw_separated_block(Canvas *self, uint num_cols, uint num_rows, uint which) {
+void draw_separated_block(Canvas *self, uint num_cols, uint num_rows, uint which) {
     // Each "separated" block is drawn with a small gap around it.
     // Use 1/8 of the cell dimensions as the gap (at least 1 pixel).
     uint gap_x = max(1u, self->width / 8u);
@@ -2005,8 +1907,7 @@ draw_separated_block(Canvas *self, uint num_cols, uint num_rows, uint which) {
     }
 }
 
-static void
-sixteenth_block(Canvas *self, uint pos) {
+void sixteenth_block(Canvas *self, uint pos) {
     // Fill one cell in a 4x4 grid (no gaps, just a 1/16 solid fill).
     uint row = pos / 4u, col = pos % 4u;
     uint block_w = self->width / 4u;
@@ -2018,8 +1919,7 @@ sixteenth_block(Canvas *self, uint pos) {
     fill_rect(self, x_start, y_start, x_end, y_end);
 }
 
-static void
-draw_sextant(Canvas *self, uint row, uint col) {
+void draw_sextant(Canvas *self, uint row, uint col) {
     Point start = {0}, end = {.x = self->width, .y = self->height};
     switch (row) {
         case 0: end.y = self->height / 3; break;
@@ -2039,8 +1939,7 @@ draw_sextant(Canvas *self, uint row, uint col) {
     }
 }
 
-static void
-sextant(Canvas *self, uint which) {
+void sextant(Canvas *self, uint which) {
 #define add_row(q, r)                        \
     if (q & 1) { draw_sextant(self, r, 0); } \
     if (q & 2) { draw_sextant(self, r, 1); }
@@ -2050,8 +1949,7 @@ sextant(Canvas *self, uint which) {
 
 // Double diagonal lines - two parallel diagonal lines with a gap between them.
 // Similar to how dhline/dvline draw double horizontal/vertical lines.
-static void
-double_cross_line(Canvas *self, uint level, bool left) {
+void double_cross_line(Canvas *self, uint level, bool left) {
     uint w = minus(self->width, 1), h = minus(self->height, 1);
     // The gap is perpendicular to the line direction
     uint gap = thickness(self, level + 1, true);
@@ -2080,8 +1978,7 @@ double_cross_line(Canvas *self, uint level, bool left) {
 // These draw light diagonal lines between specific points on the cell boundary.
 // The naming convention uses: upper/lower for top/bottom edges, left/right for side edges,
 // centre for the midpoint of top or bottom edges, middle for the midpoint of left or right edges.
-static void
-diagonal_line(Canvas *self, uint level, int x1, int y1, int x2, int y2) {
+void diagonal_line(Canvas *self, uint level, int x1, int y1, int x2, int y2) {
     Point p1 = {.x = x1, .y = y1}, p2 = {.x = x2, .y = y2};
     thick_line(self, diagonal_thickness(thickness(self, level, true), p1, p2), p1, p2);
 }
@@ -2091,8 +1988,7 @@ diagonal_line(Canvas *self, uint level, int x1, int y1, int x2, int y2) {
 //   Top: flat edge at top, arc going down. Bottom: flat edge at bottom, arc going up.
 // For left/right: diameter = cell width, circle vertically centered.
 //   Left: flat edge at left, arc going right. Right: flat edge at right, arc going left.
-static void
-justified_half_circle(Canvas *self, Edge edge) {
+void justified_half_circle(Canvas *self, Edge edge) {
     double cx, cy, radius;
     double w = self->width, h = self->height;
     radius = w / 2.0;
@@ -2120,8 +2016,7 @@ justified_half_circle(Canvas *self, Edge edge) {
 
 // Justified quarter circle (filled)
 // Diameter = cell width. Circle center at corner of cell.
-static void
-justified_quarter_circle(Canvas *self, Corner corner) {
+void justified_quarter_circle(Canvas *self, Corner corner) {
     double cx, cy;
     double radius = self->width / 2.0;
     switch (corner) {
@@ -2150,8 +2045,7 @@ justified_quarter_circle(Canvas *self, Corner corner) {
 // Diameter = cell width for all edges.
 // For left/right, center is at the cell edge so that two adjacent arcs
 // (e.g. RIGHT then LEFT) share the diameter line and join seamlessly.
-static void
-justified_half_circle_outline(Canvas *self, uint level, Edge edge) {
+void justified_half_circle_outline(Canvas *self, uint level, Edge edge) {
     double cx, cy, radius;
     double line_width = thickness_as_float(self, level, true);
     double half_lw = fmax(0.5, line_width / 2.0);
@@ -2190,6 +2084,45 @@ justified_half_circle_outline(Canvas *self, uint level, Edge edge) {
     draw_parametrized_curve_with_derivative_and_antialiasing(self, &c, line_width, circle_x, circle_y, circle_prime_x, circle_prime_y, 0, 0, NULL);
 }
 
+// Draws an arc of the outline of an ellipse with the given center and radii, the
+// angles are in degrees, clockwise from the positive x axis (which points right)
+// as the y axis points down. Used for the legacy computing circle/ellipse glyphs.
+void ellipse_arc_outline(Canvas *self, double cx, double cy, double rx, double ry, double start_deg, double end_deg, double line_width) {
+    if (rx < 1) rx = 1;
+    if (ry < 1) ry = 1;
+    Ellipse e = ellipse(cx, cy, rx, ry, start_deg, end_deg);
+    draw_parametrized_curve_with_derivative_and_antialiasing(self, &e, line_width, ellipse_x, ellipse_y, ellipse_prime_x, ellipse_prime_y, 0, 0, NULL);
+}
+
+// The outline of the triangle that fills the cell from the given corner, used
+// for U+25F8...U+25FF (the white corner triangles).
+void corner_triangle_outline(Canvas *self, uint level, Corner corner) {
+    const int w = (int)minus(self->width, 1), h = (int)minus(self->height, 1);
+    switch (corner) {
+        case TOP_LEFT:
+            draw_hline(self, 0, self->width, 0, level);
+            draw_vline(self, 0, self->height, 0, level);
+            diagonal_line(self, level, 0, h, w, 0);
+            break;
+        case TOP_RIGHT:
+            draw_hline(self, 0, self->width, 0, level);
+            draw_vline(self, 0, self->height, w, level);
+            diagonal_line(self, level, 0, 0, w, h);
+            break;
+        case BOTTOM_LEFT:
+            draw_hline(self, 0, self->width, h, level);
+            draw_vline(self, 0, self->height, 0, level);
+            diagonal_line(self, level, 0, 0, w, h);
+            break;
+        case BOTTOM_RIGHT:
+            draw_hline(self, 0, self->width, h, level);
+            draw_vline(self, 0, self->height, w, level);
+            diagonal_line(self, level, w, 0, 0, h);
+            break;
+        default: break;
+    }
+}
+
 // Twelfth/quarter circle arcs for U+1CC30-U+1CC3F
 // The 12 twelfth circles form a continuous circle when printed in a 4x4 grid:
 //   printf '\U1cc30\U1cc31\U1cc32\U1cc33\n\U1cc34  \U1cc37\n\U1cc38  \U1cc3b\n\U1cc3c\U1cc3d\U1cc3e\U1cc3f'
@@ -2204,8 +2137,7 @@ justified_half_circle_outline(Canvas *self, uint level, Edge edge) {
 //
 // For the quarter circles: in a 2x2 grid, the ellipse center is at (w, h)
 // with semi-axes rx=w, ry=h.
-static void
-twelfth_circle(Canvas *self, uint level, uint pos) {
+void twelfth_circle(Canvas *self, uint level, uint pos) {
     double line_width = thickness_as_float(self, level, true);
     double half_lw = fmax(0.5, line_width / 2.0);
     double w = self->width, h = self->height;
@@ -2359,545 +2291,14 @@ twelfth_circle(Canvas *self, uint level, uint pos) {
     draw_parametrized_curve_with_derivative_and_antialiasing(self, &e, line_width, ellipse_x, ellipse_y, ellipse_prime_x, ellipse_prime_y, 0, 0, NULL);
 }
 
+// The public entrypoint for drawing hard coded glyphs, everything interesting
+// happens in the sprite faces, this just sets up the canvases for them.
 void
 render_box_char(char_type ch, uint8_t *buf, unsigned width, unsigned height, double dpi_x, double dpi_y, double scale) {
-    Canvas canvas = {.mask = buf, .width = width, .height = height, .dpi = {.x = dpi_x, .y = dpi_y}, .supersample_factor = 1u, .scale = scale}, ss = canvas;
-    ss.mask = buf + width * height;
-    ss.supersample_factor = SUPERSAMPLE_FACTOR;
-    ss.width *= SUPERSAMPLE_FACTOR;
-    ss.height *= SUPERSAMPLE_FACTOR;
-    fill_canvas(&canvas, 0);
-    Canvas *c = &canvas;
-
-#define SB(ch, ...)           \
-    case ch:                  \
-        fill_canvas(&ss, 0);  \
-        c = &ss, __VA_ARGS__; \
-        downsample(&ss, &canvas);
-#define CC(ch, ...) \
-    case ch: __VA_ARGS__; break
-#define SS(ch, ...)      \
-    SB(ch, __VA_ARGS__); \
-    break
-#define C(ch, func, ...) CC(ch, func(c, __VA_ARGS__))
-#define S(ch, func, ...) SS(ch, func(c, __VA_ARGS__))
-    START_ALLOW_CASE_RANGE
-
-    switch (ch) {
-        default: log_error("Unknown box drawing character: U+%x rendered as blank", ch); break;
-        case L'█':
-            fill_canvas(c, 255);
-            break;
-
-            C(L'─', hline, 1);
-            C(L'━', hline, 3);
-            C(L'│', vline, 1);
-            C(L'┃', vline, 3);
-
-            C(L'╌', hholes, 1, 1);
-            C(L'╍', hholes, 3, 1);
-            C(L'┄', hholes, 1, 2);
-            C(L'┅', hholes, 3, 2);
-            C(L'┈', hholes, 1, 3);
-            C(L'┉', hholes, 3, 3);
-
-            C(L'╎', vholes, 1, 1);
-            C(L'╏', vholes, 3, 1);
-            C(L'┆', vholes, 1, 2);
-            C(L'┇', vholes, 3, 2);
-            C(L'┊', vholes, 1, 3);
-            C(L'┋', vholes, 3, 3);
-
-            C(L'╴', half_hline, 1, false, 0);
-            C(L'╵', half_vline, 1, false, 0);
-            C(L'╶', half_hline, 1, true, 0);
-            C(L'╷', half_vline, 1, true, 0);
-            C(L'╸', half_hline, 3, false, 0);
-            C(L'╹', half_vline, 3, false, 0);
-            C(L'╺', half_hline, 3, true, 0);
-            C(L'╻', half_vline, 3, true, 0);
-            CC(L'╾', half_hline(c, 3, false, 0); half_hline(c, 1, true, 0));
-            CC(L'╼', half_hline(c, 1, false, 0); half_hline(c, 3, true, 0));
-            CC(L'╿', half_vline(c, 3, false, 0); half_vline(c, 1, true, 0));
-            CC(L'╽', half_vline(c, 1, false, 0); half_vline(c, 3, true, 0));
-
-            S(L'', triangle, true, false);
-            S(L'', triangle, true, true);
-            SS(L'', half_cross_line(c, 1, TOP_LEFT); half_cross_line(c, 1, BOTTOM_LEFT));
-            S(L'', triangle, false, false);
-            S(L'', triangle, false, true);
-            SS(L'', half_cross_line(c, 1, TOP_RIGHT); half_cross_line(c, 1, BOTTOM_RIGHT));
-
-            S(L'', filled_D, true);
-            S(L'◗', filled_D, true);
-            S(L'', filled_D, false);
-            S(L'◖', filled_D, false);
-            C(L'', rounded_separator, 1, true);
-            C(L'', rounded_separator, 1, false);
-
-            S(L'', cross_line, 1, true);
-            S(L'', cross_line, 1, true);
-            S(L'╲', cross_line, 1, true);
-            S(L'', cross_line, 1, false);
-            S(L'', cross_line, 1, false);
-            S(L'╱', cross_line, 1, false);
-            SS(L'╳', cross_line(c, 1, false); cross_line(c, 1, true));
-
-            S(L'', corner_triangle, BOTTOM_LEFT);
-            S(L'◣', corner_triangle, BOTTOM_LEFT);
-            S(L'', corner_triangle, BOTTOM_RIGHT);
-            S(L'◢', corner_triangle, BOTTOM_RIGHT);
-            S(L'', corner_triangle, TOP_LEFT);
-            S(L'◤', corner_triangle, TOP_LEFT);
-            S(L'', corner_triangle, TOP_RIGHT);
-            S(L'◥', corner_triangle, TOP_RIGHT);
-
-            C(L'', progress_bar, LEFT, false);
-            C(L'', progress_bar, MIDDLE, false);
-            C(L'', progress_bar, RIGHT, false);
-            C(L'', progress_bar, LEFT, true);
-            C(L'', progress_bar, MIDDLE, true);
-            C(L'', progress_bar, RIGHT, true);
-
-            C(L'', spinner, 1, 235, 305);
-            C(L'', spinner, 1, 270, 390);
-            C(L'', spinner, 1, 315, 470);
-            C(L'', spinner, 1, 360, 540);
-            C(L'', spinner, 1, 80, 220);
-            C(L'', spinner, 1, 170, 270);
-            C(L'○', spinner, 0, 0, 360);
-            C(L'◜', spinner, 1, 180, 270);
-            C(L'◝', spinner, 1, 270, 360);
-            C(L'◞', spinner, 1, 360, 450);
-            C(L'◟', spinner, 1, 450, 540);
-            C(L'◠', spinner, 1, 180, 360);
-            C(L'◡', spinner, 1, 0, 180);
-            S(L'●', fill_circle, 1.0, 0, false);
-            S(L'◉', draw_fish_eye, 0);
-
-            C(L'═', dhline, 1, TOP_EDGE | BOTTOM_EDGE);
-            C(L'║', dvline, 1, LEFT_EDGE | RIGHT_EDGE);
-            CC(L'╞', vline(c, 1); half_dhline(c, 1, true, TOP_EDGE | BOTTOM_EDGE));
-            CC(L'╡', vline(c, 1); half_dhline(c, 1, false, TOP_EDGE | BOTTOM_EDGE));
-            CC(L'╥', hline(c, 1); half_dvline(c, 1, true, LEFT_EDGE | RIGHT_EDGE));
-            CC(L'╨', hline(c, 1); half_dvline(c, 1, false, LEFT_EDGE | RIGHT_EDGE));
-            CC(L'╪', vline(c, 1); dhline(c, 1, TOP_EDGE | BOTTOM_EDGE));
-            CC(L'╫', hline(c, 1), dvline(c, 1, LEFT_EDGE | RIGHT_EDGE));
-            CC(L'╬', inner_corner(c, 1, TOP_LEFT); inner_corner(c, 1, TOP_RIGHT); inner_corner(c, 1, BOTTOM_LEFT); inner_corner(c, 1, BOTTOM_RIGHT));
-            CC(L'╠', inner_corner(c, 1, TOP_RIGHT); inner_corner(c, 1, BOTTOM_RIGHT); dvline(c, 1, LEFT_EDGE));
-            CC(L'╣', inner_corner(c, 1, TOP_LEFT); inner_corner(c, 1, BOTTOM_LEFT); dvline(c, 1, RIGHT_EDGE));
-            CC(L'╦', inner_corner(c, 1, BOTTOM_LEFT); inner_corner(c, 1, BOTTOM_RIGHT); dhline(c, 1, TOP_EDGE));
-            CC(L'╩', inner_corner(c, 1, TOP_LEFT); inner_corner(c, 1, TOP_RIGHT); dhline(c, 1, BOTTOM_EDGE));
-
-#define EH(ch, ...) C(ch, eight_block, true, __VA_ARGS__, -1);
-            EH(L'▔', 0);
-            EH(L'▀', 0, 1, 2, 3);
-            EH(L'▁', 7);
-            EH(L'▂', 6, 7);
-            EH(L'▃', 5, 6, 7);
-            EH(L'▄', 4, 5, 6, 7);
-            EH(L'▅', 3, 4, 5, 6, 7);
-            EH(L'▆', 2, 3, 4, 5, 6, 7);
-            EH(L'▇', 1, 2, 3, 4, 5, 6, 7);
-#undef EH
-#define EV(ch, ...) C(ch, eight_block, false, __VA_ARGS__, -1);
-            EV(L'▉', 0, 1, 2, 3, 4, 5, 6);
-            EV(L'▊', 0, 1, 2, 3, 4, 5);
-            EV(L'▋', 0, 1, 2, 3, 4);
-            EV(L'▌', 0, 1, 2, 3);
-            EV(L'▍', 0, 1, 2);
-            EV(L'▎', 0, 1);
-            EV(L'▏', 0);
-            EV(L'▕', 7);
-            EV(L'▐', 4, 5, 6, 7);
-#undef EV
-#define SH(ch, ...) C(ch, shade, (Shade){__VA_ARGS__});
-            SH(L'░', .xnum = 12, .light = true);
-            SH(L'▒', .xnum = 12);
-            SH(L'▓', .xnum = 12, .light = true, .invert = true);
-            SH(L'🮌', .xnum = 12, .which_half = LEFT_EDGE);
-            SH(L'🮍', .xnum = 12, .which_half = RIGHT_EDGE);
-            SH(L'🮎', .xnum = 12, .which_half = TOP_EDGE);
-            SH(L'🮏', .xnum = 12, .which_half = BOTTOM_EDGE);
-            SH(L'🮐', .xnum = 12, .invert = true);
-            SH(L'🮑', .xnum = 12, .invert = true, .fill_blank = true, .which_half = BOTTOM_EDGE);
-            SH(L'🮒', .xnum = 12, .invert = true, .fill_blank = true, .which_half = TOP_EDGE);
-            SH(L'🮓', .xnum = 12, .invert = true, .fill_blank = true, .which_half = RIGHT_EDGE);
-            SH(L'🮔', .xnum = 12, .invert = true, .fill_blank = true, .which_half = LEFT_EDGE);
-            SH(L'🮕', .xnum = 4, .ynum = 4);
-            SH(L'🮖', .xnum = 4, .ynum = 4, .invert = true);
-            SH(L'🮗', .xnum = 1, .ynum = 4, .invert = true);
-#define M(ch, corner)                                                                    \
-    SB(ch, corner_triangle(c, corner));                                                  \
-    memcpy(ss.mask, canvas.mask, sizeof(canvas.mask[0]) * canvas.width * canvas.height); \
-    fill_canvas(&canvas, 0);                                                             \
-    shade(&canvas, (Shade){.xnum = 12});                                                 \
-    apply_mask(&canvas, ss.mask);                                                        \
-    break;
-            M(L'🮜', TOP_LEFT);
-            M(L'🮝', TOP_RIGHT);
-            M(L'🮞', BOTTOM_RIGHT);
-            M(L'🮟', BOTTOM_LEFT);
-#undef M
-#undef SH
-            S(L'🮘', cross_shade, false);
-            S(L'🮙', cross_shade, true);
-
-            C(L'▖', quad, BOTTOM_LEFT);
-            C(L'▗', quad, BOTTOM_RIGHT);
-            C(L'▘', quad, TOP_LEFT);
-            C(L'▝', quad, TOP_RIGHT);
-            C(L'▙', quads, TOP_LEFT, BOTTOM_LEFT, BOTTOM_RIGHT, 0);
-            C(L'▚', quads, TOP_LEFT, BOTTOM_RIGHT, 0);
-            C(L'▛', quads, TOP_LEFT, TOP_RIGHT, BOTTOM_LEFT, 0);
-            C(L'▜', quads, TOP_LEFT, TOP_RIGHT, BOTTOM_RIGHT, 0);
-            C(L'▞', quads, TOP_RIGHT, BOTTOM_LEFT, 0);
-            C(L'▟', quads, TOP_RIGHT, BOTTOM_LEFT, BOTTOM_RIGHT, 0);
-
-            S(L'🬼', smooth_mosaic, true, 0, 2. / 3, 0.5, 1);
-            S(L'🬽', smooth_mosaic, true, 0, 2. / 3, 1, 1);
-            S(L'🬾', smooth_mosaic, true, 0, 1. / 3, 0.5, 1);
-            S(L'🬿', smooth_mosaic, true, 0, 1. / 3, 1, 1);
-            S(L'🭀', smooth_mosaic, true, 0, 0, 0.5, 1);
-
-            S(L'🭁', smooth_mosaic, true, 0, 1. / 3, 0.5, 0);
-            S(L'🭂', smooth_mosaic, true, 0, 1. / 3, 1, 0);
-            S(L'🭃', smooth_mosaic, true, 0, 2. / 3, 0.5, 0);
-            S(L'🭄', smooth_mosaic, true, 0, 2. / 3, 1, 0);
-            S(L'🭅', smooth_mosaic, true, 0, 1, 0.5, 0);
-            S(L'🭆', smooth_mosaic, true, 0, 2. / 3, 1, 1. / 3);
-
-            S(L'🭇', smooth_mosaic, true, 0.5, 1, 1, 2. / 3);
-            S(L'🭈', smooth_mosaic, true, 0, 1, 1, 2. / 3);
-            S(L'🭉', smooth_mosaic, true, 0.5, 1, 1, 1. / 3);
-            S(L'🭊', smooth_mosaic, true, 0, 1, 1, 1. / 3);
-            S(L'🭋', smooth_mosaic, true, 0.5, 1, 1, 0);
-
-            S(L'🭌', smooth_mosaic, true, 0.5, 0, 1, 1. / 3);
-            S(L'🭍', smooth_mosaic, true, 0, 0, 1, 1. / 3);
-            S(L'🭎', smooth_mosaic, true, 0.5, 0, 1, 2. / 3);
-            S(L'🭏', smooth_mosaic, true, 0, 0, 1, 2. / 3);
-            S(L'🭐', smooth_mosaic, true, 0.5, 0, 1, 1);
-            S(L'🭑', smooth_mosaic, true, 0, 1. / 3, 1, 2. / 3);
-
-            S(L'🭒', smooth_mosaic, false, 0, 2. / 3, 0.5, 1);
-            S(L'🭓', smooth_mosaic, false, 0, 2. / 3, 1, 1);
-            S(L'🭔', smooth_mosaic, false, 0, 1. / 3, 0.5, 1);
-            S(L'🭕', smooth_mosaic, false, 0, 1. / 3, 1, 1);
-            S(L'🭖', smooth_mosaic, false, 0, 0, 0.5, 1);
-
-            S(L'🭗', smooth_mosaic, false, 0, 1. / 3, 0.5, 0);
-            S(L'🭘', smooth_mosaic, false, 0, 1. / 3, 1, 0);
-            S(L'🭙', smooth_mosaic, false, 0, 2. / 3, 0.5, 0);
-            S(L'🭚', smooth_mosaic, false, 0, 2. / 3, 1, 0);
-            S(L'🭛', smooth_mosaic, false, 0, 1, 0.5, 0);
-
-            S(L'🭜', smooth_mosaic, false, 0, 2. / 3, 1, 1. / 3);
-            S(L'🭝', smooth_mosaic, false, 0.5, 1, 1, 2. / 3);
-            S(L'🭞', smooth_mosaic, false, 0, 1, 1, 2. / 3);
-            S(L'🭟', smooth_mosaic, false, 0.5, 1, 1, 1. / 3);
-            S(L'🭠', smooth_mosaic, false, 0, 1, 1, 1. / 3);
-            S(L'🭡', smooth_mosaic, false, 0.5, 1, 1, 0);
-
-            S(L'🭢', smooth_mosaic, false, 0.5, 0, 1, 1. / 3);
-            S(L'🭣', smooth_mosaic, false, 0, 0, 1, 1. / 3);
-            S(L'🭤', smooth_mosaic, false, 0.5, 0, 1, 2. / 3);
-            S(L'🭥', smooth_mosaic, false, 0, 0, 1, 2. / 3);
-            S(L'🭦', smooth_mosaic, false, 0.5, 0, 1, 1);
-            S(L'🭧', smooth_mosaic, false, 0, 1. / 3, 1, 2. / 3);
-
-            S(L'🭨', half_triangle, LEFT_EDGE, true);
-            S(L'🭩', half_triangle, TOP_EDGE, true);
-            S(L'🭪', half_triangle, RIGHT_EDGE, true);
-            S(L'🭫', half_triangle, BOTTOM_EDGE, true);
-            S(L'🭬', half_triangle, LEFT_EDGE, false);
-            SS(L'🮛', half_triangle(c, LEFT_EDGE, false), half_triangle(c, RIGHT_EDGE, false));
-            S(L'🭭', half_triangle, TOP_EDGE, false);
-            S(L'🭮', half_triangle, RIGHT_EDGE, false);
-            S(L'🭯', half_triangle, BOTTOM_EDGE, false);
-            SS(L'🮚', half_triangle(c, BOTTOM_EDGE, false), half_triangle(c, TOP_EDGE, false));
-
-            CC(L'🭼', eight_bar(c, 0, false); eight_bar(c, 7, true));
-            CC(L'🭽', eight_bar(c, 0, false); eight_bar(c, 0, true));
-            CC(L'🭾', eight_bar(c, 7, false); eight_bar(c, 0, true));
-            CC(L'🭿', eight_bar(c, 7, false); eight_bar(c, 7, true));
-            CC(L'🮀', eight_bar(c, 0, true); eight_bar(c, 7, true));
-            CC(L'🮁', eight_bar(c, 0, true); eight_bar(c, 2, true); eight_bar(c, 4, true); eight_bar(c, 7, true));
-
-            C(L'🮂', eight_block, true, 0, 1, -1);
-            C(L'🮃', eight_block, true, 0, 1, 2, -1);
-            C(L'🮄', eight_block, true, 0, 1, 2, 3, 4, -1);
-            C(L'🮅', eight_block, true, 0, 1, 2, 3, 4, 5, -1);
-            C(L'🮆', eight_block, true, 0, 1, 2, 3, 4, 5, 6, -1);
-            C(L'🮇', eight_block, false, 6, 7, -1);
-            C(L'🮈', eight_block, false, 5, 6, 7, -1);
-            C(L'🮉', eight_block, false, 3, 4, 5, 6, 7, -1);
-            C(L'🮊', eight_block, false, 2, 3, 4, 5, 6, 7, -1);
-            C(L'🮋', eight_block, false, 1, 2, 3, 4, 5, 6, 7, -1);
-
-            S(L'🮠', mid_lines, 1, TOP_LEFT, 0);
-            S(L'🮡', mid_lines, 1, TOP_RIGHT, 0);
-            S(L'🮢', mid_lines, 1, BOTTOM_LEFT, 0);
-            S(L'🮣', mid_lines, 1, BOTTOM_RIGHT, 0);
-            S(L'🮤', mid_lines, 1, TOP_LEFT, BOTTOM_LEFT, 0);
-            S(L'🮥', mid_lines, 1, TOP_RIGHT, BOTTOM_RIGHT, 0);
-            S(L'🮦', mid_lines, 1, BOTTOM_RIGHT, BOTTOM_LEFT, 0);
-            S(L'🮧', mid_lines, 1, TOP_RIGHT, TOP_LEFT, 0);
-            S(L'🮨', mid_lines, 1, BOTTOM_RIGHT, TOP_LEFT, 0);
-            S(L'🮩', mid_lines, 1, BOTTOM_LEFT, TOP_RIGHT, 0);
-            S(L'🮪', mid_lines, 1, BOTTOM_LEFT, TOP_RIGHT, BOTTOM_RIGHT, 0);
-            S(L'🮫', mid_lines, 1, BOTTOM_LEFT, TOP_LEFT, BOTTOM_RIGHT, 0);
-            S(L'🮬', mid_lines, 1, TOP_RIGHT, TOP_LEFT, BOTTOM_RIGHT, 0);
-            S(L'🮭', mid_lines, 1, TOP_RIGHT, TOP_LEFT, BOTTOM_LEFT, 0);
-            S(L'🮮', mid_lines, 1, TOP_RIGHT, BOTTOM_RIGHT, TOP_LEFT, BOTTOM_LEFT, 0);
-
-            C(L'', hline, 1);
-            C(L'', vline, 1);
-            C(L'', fading_hline, 1, 4, RIGHT_EDGE);
-            C(L'', fading_hline, 1, 4, LEFT_EDGE);
-            C(L'', fading_vline, 1, 5, BOTTOM_EDGE);
-            C(L'', fading_vline, 1, 5, TOP_EDGE);
-
-            C(L'', rounded_corner, 1, TOP_LEFT);
-            C(L'', rounded_corner, 1, TOP_RIGHT);
-            C(L'', rounded_corner, 1, BOTTOM_LEFT);
-            C(L'', rounded_corner, 1, BOTTOM_RIGHT);
-
-            CC(L'', vline(c, 1); rounded_corner(c, 1, BOTTOM_LEFT));
-            CC(L'', vline(c, 1); rounded_corner(c, 1, TOP_LEFT));
-            CC(L'', rounded_corner(c, 1, BOTTOM_LEFT), rounded_corner(c, 1, TOP_LEFT));
-            CC(L'', vline(c, 1); rounded_corner(c, 1, BOTTOM_RIGHT));
-            CC(L'', vline(c, 1); rounded_corner(c, 1, TOP_RIGHT));
-            CC(L'', rounded_corner(c, 1, TOP_RIGHT), rounded_corner(c, 1, BOTTOM_RIGHT));
-            CC(L'', hline(c, 1); rounded_corner(c, 1, TOP_RIGHT));
-            CC(L'', hline(c, 1); rounded_corner(c, 1, TOP_LEFT));
-            CC(L'', rounded_corner(c, 1, TOP_LEFT), rounded_corner(c, 1, TOP_RIGHT));
-            CC(L'', hline(c, 1); rounded_corner(c, 1, BOTTOM_RIGHT));
-            CC(L'', hline(c, 1); rounded_corner(c, 1, BOTTOM_LEFT));
-            CC(L'', rounded_corner(c, 1, BOTTOM_LEFT), rounded_corner(c, 1, BOTTOM_RIGHT));
-            CC(L'', vline(c, 1); rounded_corner(c, 1, BOTTOM_LEFT), rounded_corner(c, 1, BOTTOM_RIGHT));
-            CC(L'', vline(c, 1); rounded_corner(c, 1, TOP_LEFT), rounded_corner(c, 1, TOP_RIGHT));
-            CC(L'', hline(c, 1); rounded_corner(c, 1, TOP_RIGHT), rounded_corner(c, 1, BOTTOM_RIGHT));
-            CC(L'', hline(c, 1); rounded_corner(c, 1, BOTTOM_LEFT), rounded_corner(c, 1, TOP_LEFT));
-            CC(L'', vline(c, 1); rounded_corner(c, 1, TOP_LEFT), rounded_corner(c, 1, BOTTOM_RIGHT));
-            CC(L'', vline(c, 1); rounded_corner(c, 1, TOP_RIGHT), rounded_corner(c, 1, BOTTOM_LEFT));
-            CC(L'', hline(c, 1); rounded_corner(c, 1, TOP_LEFT), rounded_corner(c, 1, BOTTOM_RIGHT));
-            CC(L'', hline(c, 1); rounded_corner(c, 1, TOP_RIGHT), rounded_corner(c, 1, BOTTOM_LEFT));
-
-#define P(ch, lines)            \
-    S(ch, commit, lines, true); \
-    S(ch + 1, commit, lines, false);
-            P(L'', 0);
-            P(L'', RIGHT_EDGE);
-            P(L'', LEFT_EDGE);
-            P(L'', LEFT_EDGE | RIGHT_EDGE);
-            P(L'', BOTTOM_EDGE);
-            P(L'', TOP_EDGE);
-            P(L'', BOTTOM_EDGE | TOP_EDGE);
-            P(L'', RIGHT_EDGE | BOTTOM_EDGE);
-            P(L'', LEFT_EDGE | BOTTOM_EDGE);
-            P(L'', RIGHT_EDGE | TOP_EDGE);
-            P(L'', LEFT_EDGE | TOP_EDGE);
-            P(L'', TOP_EDGE | BOTTOM_EDGE | RIGHT_EDGE);
-            P(L'', TOP_EDGE | BOTTOM_EDGE | LEFT_EDGE);
-            P(L'', LEFT_EDGE | RIGHT_EDGE | BOTTOM_EDGE);
-            P(L'', LEFT_EDGE | RIGHT_EDGE | TOP_EDGE);
-            P(L'', LEFT_EDGE | RIGHT_EDGE | TOP_EDGE | BOTTOM_EDGE);
-#undef P
-#define Q(ch, which)                \
-    C(ch, corner, t, t, which);     \
-    C(ch + 1, corner, f, t, which); \
-    C(ch + 2, corner, t, f, which); \
-    C(ch + 3, corner, f, f, which);
-            Q(L'┌', BOTTOM_RIGHT);
-            Q(L'┐', BOTTOM_LEFT);
-            Q(L'└', TOP_RIGHT);
-            Q(L'┘', TOP_LEFT);
-#undef Q
-            C(L'╭', rounded_corner, 1, TOP_LEFT);
-            C(L'╮', rounded_corner, 1, TOP_RIGHT);
-            C(L'╰', rounded_corner, 1, BOTTOM_LEFT);
-            C(L'╯', rounded_corner, 1, BOTTOM_RIGHT);
-
-        case L'┼' ... L'┼' + 15: cross(c, ch - L'┼'); break;
-#define T(q, func) \
-    case q ... q + 7: func(c, q, ch - q); break;
-            T(L'├', vert_t);
-            T(L'┤', vert_t);
-            T(L'┬', horz_t);
-            T(L'┴', horz_t);
-#undef T
-            C(L'╒', dvcorner, 1, TOP_LEFT);
-            C(L'╕', dvcorner, 1, TOP_RIGHT);
-            C(L'╘', dvcorner, 1, BOTTOM_LEFT);
-            C(L'╛', dvcorner, 1, BOTTOM_RIGHT);
-            C(L'╓', dhcorner, 1, TOP_LEFT);
-            C(L'╖', dhcorner, 1, TOP_RIGHT);
-            C(L'╙', dhcorner, 1, BOTTOM_LEFT);
-            C(L'╜', dhcorner, 1, BOTTOM_RIGHT);
-            C(L'╔', dcorner, 1, TOP_LEFT);
-            C(L'╗', dcorner, 1, TOP_RIGHT);
-            C(L'╚', dcorner, 1, BOTTOM_LEFT);
-            C(L'╝', dcorner, 1, BOTTOM_RIGHT);
-            C(L'╟', dpip, 1, RIGHT_EDGE);
-            C(L'╢', dpip, 1, LEFT_EDGE);
-            C(L'╤', dpip, 1, BOTTOM_EDGE);
-            C(L'╧', dpip, 1, TOP_EDGE);
-
-        case 0x2800 ... 0x2800 + 255: braille(c, ch - 0x2800); break;
-        case 0x1fb00 ... 0x1fb00 + 19: sextant(c, ch - 0x1fb00 + 1); break;
-        case 0x1fb14 ... 0x1fb14 + 19: sextant(c, ch - 0x1fb00 + 2); break;
-        case 0x1fb28 ... 0x1fb28 + 19: sextant(c, ch - 0x1fb00 + 3); break;
-        case 0x1fb70 ... 0x1fb70 + 5: eight_bar(c, ch - 0x1fb6f, false); break;
-        case 0x1fb76 ... 0x1fb76 + 5: eight_bar(c, ch - 0x1fb75, true); break;
-        case 0x1fbe6: octant(c, 0xe6); break;
-        case 0x1fbe7: octant(c, 0xe7); break;
-        case 0x1cd00 ... 0x1cde5: octant(c, ch - 0x1cd00); break;
-
-        // U+1FBCE LEFT TWO THIRDS BLOCK
-        case 0x1fbce: fill_rect(c, 0, 0, 2 * c->width / 3, c->height); break;
-        // U+1FBCF LEFT ONE THIRD BLOCK
-        case 0x1fbcf: fill_rect(c, 0, 0, c->width / 3, c->height); break;
-
-        // U+1FBE4 UPPER CENTRE ONE QUARTER BLOCK
-        case 0x1fbe4: fill_rect(c, c->width / 4, 0, 3 * c->width / 4, c->height / 2); break;
-        // U+1FBE5 LOWER CENTRE ONE QUARTER BLOCK
-        case 0x1fbe5:
-            fill_rect(c, c->width / 4, c->height / 2, 3 * c->width / 4, c->height);
-            break;
-
-            // U+1FBD0-1FBDF Diagonal box drawings (supersampled for anti-aliasing)
-            // Key points used: UL=(0,0), UC=(w/2,0), UR=(w,0), ML=(0,h/2), MC=(w/2,h/2), MR=(w,h/2),
-            //                  LL=(0,h), LC=(w/2,h), LR=(w,h)
-#define DL(x1, y1, x2, y2) diagonal_line(c, 1, x1, y1, x2, y2)
-#define W (int)minus(c->width, 1)
-#define H (int)minus(c->height, 1)
-#define HW ((int)(c->width / 2))
-#define HH ((int)(c->height / 2))
-            // 1FBD0: middle right to lower left
-            SS(0x1fbd0, DL(W, HH, 0, H));
-            // 1FBD1: upper right to middle left
-            SS(0x1fbd1, DL(W, 0, 0, HH));
-            // 1FBD2: upper left to middle right
-            SS(0x1fbd2, DL(0, 0, W, HH));
-            // 1FBD3: middle left to lower right
-            SS(0x1fbd3, DL(0, HH, W, H));
-            // 1FBD4: upper left to lower centre
-            SS(0x1fbd4, DL(0, 0, HW, H));
-            // 1FBD5: upper centre to lower right
-            SS(0x1fbd5, DL(HW, 0, W, H));
-            // 1FBD6: upper right to lower centre
-            SS(0x1fbd6, DL(W, 0, HW, H));
-            // 1FBD7: upper centre to lower left
-            SS(0x1fbd7, DL(HW, 0, 0, H));
-            // 1FBD8: upper left to middle centre to upper right (V open down)
-            SS(0x1fbd8, DL(0, 0, HW, HH); DL(HW, HH, W, 0));
-            // 1FBD9: upper right to middle centre to lower right (> shape)
-            SS(0x1fbd9, DL(W, 0, HW, HH); DL(HW, HH, W, H));
-            // 1FBDA: lower left to middle centre to lower right (^ shape)
-            SS(0x1fbda, DL(0, H, HW, HH); DL(HW, HH, W, H));
-            // 1FBDB: upper left to middle centre to lower left (< shape)
-            SS(0x1fbdb, DL(0, 0, HW, HH); DL(HW, HH, 0, H));
-            // 1FBDC: upper left to lower centre to upper right (V with apex at bottom-center)
-            SS(0x1fbdc, DL(0, 0, HW, H); DL(HW, H, W, 0));
-            // 1FBDD: upper right to middle left to lower right (> with apex at middle-left)
-            SS(0x1fbdd, DL(W, 0, 0, HH); DL(0, HH, W, H));
-            // 1FBDE: lower left to upper centre to lower right (^ with apex at upper-center)
-            SS(0x1fbde, DL(0, H, HW, 0); DL(HW, 0, W, H));
-            // 1FBDF: upper left to middle right to lower left (< with apex at middle-right)
-            SS(0x1fbdf, DL(0, 0, W, HH); DL(W, HH, 0, H));
-#undef DL
-#undef W
-#undef H
-#undef HW
-#undef HH
-
-            // U+1FBE0-1FBE3 Justified half white circles (outlines)
-            S(0x1fbe0, justified_half_circle_outline, 1, TOP_EDGE);
-            S(0x1fbe1, justified_half_circle_outline, 1, RIGHT_EDGE);
-            S(0x1fbe2, justified_half_circle_outline, 1, BOTTOM_EDGE);
-            S(0x1fbe3, justified_half_circle_outline, 1, LEFT_EDGE);
-
-            // U+1FBE8-1FBEB Justified half black circles (filled)
-            S(0x1fbe8, justified_half_circle, TOP_EDGE);
-            S(0x1fbe9, justified_half_circle, RIGHT_EDGE);
-            S(0x1fbea, justified_half_circle, BOTTOM_EDGE);
-            S(0x1fbeb, justified_half_circle, LEFT_EDGE);
-
-            // U+1FBEC-1FBEF Justified quarter black circles (filled)
-            S(0x1fbec, justified_quarter_circle, TOP_RIGHT);
-            S(0x1fbed, justified_quarter_circle, BOTTOM_LEFT);
-            S(0x1fbee, justified_quarter_circle, BOTTOM_RIGHT);
-            S(0x1fbef, justified_quarter_circle, TOP_LEFT);
-
-            // U+1CC1B-1CC1E Box drawing variants
-            // 1CC1B: HORIZONTAL AND UPPER RIGHT - full hline + half vline going up from right quarter
-            CC(0x1cc1b, hline(c, 1); draw_vline(c, 0, c->height / 2, 3 * c->width / 4, 1));
-            // 1CC1C: HORIZONTAL AND LOWER RIGHT - full hline + half vline going down from right quarter
-            CC(0x1cc1c, hline(c, 1); draw_vline(c, c->height / 2, c->height, 3 * c->width / 4, 1));
-            // 1CC1D: TOP AND UPPER LEFT - half vline from top to 1/4 + half hline going left from that point
-            CC(0x1cc1d, draw_vline(c, 0, c->height / 4, c->width / 2, 1); draw_hline(c, 0, c->width / 2, c->height / 4, 1));
-            // 1CC1E: BOTTOM AND LOWER LEFT - half vline from bottom to 3/4 + half hline going left from that point
-            CC(0x1cc1e, draw_vline(c, 3 * c->height / 4, c->height, c->width / 2, 1); draw_hline(c, 0, c->width / 2, 3 * c->height / 4, 1));
-
-            // U+1CC1F-1CC20 Double diagonal lines
-            S(0x1cc1f, double_cross_line, 1, false);
-            S(0x1cc20, double_cross_line, 1, true);
-
-        // Symbols for Legacy Computing Supplement (U+1CC00–U+1CEBF)
-        // Separated Block Quadrant (bit 0=TL, 1=TR, 2=BL, 3=BR)
-        case 0x1cc21 ... 0x1cc21 + 14: draw_separated_block(c, 2, 2, ch - 0x1cc21 + 1); break;
-
-        // U+1CC30-1CC3F Twelfth and quarter circle arcs
-        case 0x1cc30 ... 0x1cc3f:
-            twelfth_circle(c, 1, ch - 0x1cc30);
-            break;
-
-            // U+1CE16-1CE19 Box drawings light vertical with offset horizontal
-            // 1CE16: VERTICAL AND TOP RIGHT - full vline + half hline going right from 1/4 height
-            CC(0x1ce16, vline(c, 1); draw_hline(c, c->width / 2, c->width, c->height / 4, 1));
-            // 1CE17: VERTICAL AND BOTTOM RIGHT - full vline + half hline going right from 3/4 height
-            CC(0x1ce17, vline(c, 1); draw_hline(c, c->width / 2, c->width, 3 * c->height / 4, 1));
-            // 1CE18: VERTICAL AND TOP LEFT - full vline + half hline going left from 1/4 height
-            CC(0x1ce18, vline(c, 1); draw_hline(c, 0, c->width / 2, c->height / 4, 1));
-            // 1CE19: VERTICAL AND BOTTOM LEFT - full vline + half hline going left from 3/4 height
-            CC(0x1ce19, vline(c, 1); draw_hline(c, 0, c->width / 2, 3 * c->height / 4, 1));
-        // Separated Block Sextant (same bit encoding as regular sextants)
-        case 0x1ce51 ... 0x1ce51 + 62: draw_separated_block(c, 2, 3, ch - 0x1ce51 + 1); break;
-        // One Sixteenth Block: individual 1/16 cells in a 4x4 grid, row-major
-        case 0x1ce90 ... 0x1ce90 + 15: sixteenth_block(c, ch - 0x1ce90); break;
-        // One Quarter Block partial fills: each is a sub-rectangle of one of the four quarter strips
-        // Lower quarter (y: 3H/4 to H)
-        case 0x1cea0: fill_rect(c, c->width / 2, 3 * c->height / 4, c->width, c->height); break;
-        case 0x1cea1: fill_rect(c, c->width / 4, 3 * c->height / 4, c->width, c->height); break;
-        case 0x1cea2: fill_rect(c, 0, 3 * c->height / 4, 3 * c->width / 4, c->height); break;
-        case 0x1cea3: fill_rect(c, 0, 3 * c->height / 4, c->width / 2, c->height); break;
-        // Left quarter (x: 0 to W/4)
-        case 0x1cea4: fill_rect(c, 0, c->height / 2, c->width / 4, c->height); break;
-        case 0x1cea5: fill_rect(c, 0, c->height / 4, c->width / 4, c->height); break;
-        case 0x1cea6: fill_rect(c, 0, 0, c->width / 4, 3 * c->height / 4); break;
-        case 0x1cea7: fill_rect(c, 0, 0, c->width / 4, c->height / 2); break;
-        // Upper quarter (y: 0 to H/4)
-        case 0x1cea8: fill_rect(c, 0, 0, c->width / 2, c->height / 4); break;
-        case 0x1cea9: fill_rect(c, 0, 0, 3 * c->width / 4, c->height / 4); break;
-        case 0x1ceaa: fill_rect(c, c->width / 4, 0, c->width, c->height / 4); break;
-        case 0x1ceab: fill_rect(c, c->width / 2, 0, c->width, c->height / 4); break;
-        // Right quarter (x: 3W/4 to W)
-        case 0x1ceac: fill_rect(c, 3 * c->width / 4, 0, c->width, c->height / 2); break;
-        case 0x1cead: fill_rect(c, 3 * c->width / 4, 0, c->width, 3 * c->height / 4); break;
-        case 0x1ceae: fill_rect(c, 3 * c->width / 4, c->height / 4, c->width, c->height); break;
-        case 0x1ceaf: fill_rect(c, 3 * c->width / 4, c->height / 2, c->width, c->height); break;
-    }
-    free(canvas.holes);
-    free(canvas.y_limits);
-    free(ss.holes);
-    free(ss.y_limits);
-    END_ALLOW_CASE_RANGE
-#undef CC
-#undef SS
-#undef C
-#undef S
-#undef SB
-#undef t
-#undef f
+    Canvas canvas = sprite_canvas(buf, width, height, dpi_x, dpi_y, scale);
+    Canvas ss = sprite_canvas_supersampled(&canvas);
+    render_sprite_char(ch, &canvas, &ss);
+    sprite_canvas_free_scratch(&canvas);
+    sprite_canvas_free_scratch(&ss);
 }
+
