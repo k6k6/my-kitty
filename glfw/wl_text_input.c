@@ -30,15 +30,22 @@ commit(void) {
 }
 
 static void
+enable_text_input(struct zwp_text_input_v3 *txt_input) {
+    zwp_text_input_v3_enable(txt_input);
+    zwp_text_input_v3_set_content_type(txt_input, ZWP_TEXT_INPUT_V3_CONTENT_HINT_NONE, ZWP_TEXT_INPUT_V3_CONTENT_PURPOSE_TERMINAL);
+    // Every enable request resets the cursor rectangle, even when the cursor has
+    // not moved. Restore it for both text-input enter and window focus updates.
+    if (last_cursor_width > 0) {
+        zwp_text_input_v3_set_cursor_rectangle(txt_input, last_cursor_left, last_cursor_top, last_cursor_width, last_cursor_height);
+    }
+}
+
+static void
 text_input_enter(void *data UNUSED, struct zwp_text_input_v3 *txt_input, struct wl_surface *surface UNUSED) {
     debug("text-input: enter event\n");
     if (txt_input) {
         ime_focused = true;
-        zwp_text_input_v3_enable(txt_input);
-        zwp_text_input_v3_set_content_type(txt_input, ZWP_TEXT_INPUT_V3_CONTENT_HINT_NONE, ZWP_TEXT_INPUT_V3_CONTENT_PURPOSE_TERMINAL);
-        if (last_cursor_width > 0) {
-            zwp_text_input_v3_set_cursor_rectangle(txt_input, last_cursor_left, last_cursor_top, last_cursor_width, last_cursor_height);
-        }
+        enable_text_input(txt_input);
         commit();
     }
 }
@@ -154,8 +161,7 @@ _glfwPlatformUpdateIMEState(_GLFWwindow *w, const GLFWIMEUpdateEvent *ev) {
         case GLFW_IME_UPDATE_FOCUS:
             debug("\ntext-input: updating IME focus state, ime_focused: %d ev->focused: %d\n", ime_focused, ev->focused);
             if (ime_focused) {
-                zwp_text_input_v3_enable(text_input);
-                zwp_text_input_v3_set_content_type(text_input, ZWP_TEXT_INPUT_V3_CONTENT_HINT_NONE, ZWP_TEXT_INPUT_V3_CONTENT_PURPOSE_TERMINAL);
+                enable_text_input(text_input);
             } else {
                 free(pending_pre_edit);
                 pending_pre_edit = NULL;
