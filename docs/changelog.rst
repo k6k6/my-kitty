@@ -231,6 +231,11 @@ Detailed list of changes
 0.50.0 [future]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
+- Fix changing text marker colors at runtime, for example with
+  :code:`kitten @ set-colors` or automatic dark/light theme switching, applying
+  the colors of each marker to the next one, with changes to ``mark3`` having
+  no effect
+
 - Allow docking kitty windows to the edges of other windows or of the tab, for
   status bars, file trees, etc. Create them with :code:`launch --type=window-dock`
   or :code:`launch --type=tab-dock`, see :ref:`docks`
@@ -416,6 +421,8 @@ Detailed list of changes
   downloaded only once and images are decoded only once for all such outputs.
   Specifying the same output file twice is now an error (:pull:`10744`)
 
+- Wayland: Fix `kitty --os-window-tag` not setting the window tag (:iss:`10759`)
+
 - Clipboard kitten: Correctly detect duplicate output files when a path contains
   a symlink followed by ``..``, avoiding overwrites of the same target and
   erroneous rejection of distinct output files
@@ -493,6 +500,11 @@ Detailed list of changes
 
 - macOS: Fix emoji rendered with a monochrome emoji font such as Noto Emoji
   not using the foreground color (:iss:`10757`)
+
+- :option:`kitty --config`\=NONE now also skips the automatic color theme
+  files, :file:`open-actions.conf`, :file:`launch-actions.conf`,
+  :file:`mime.types`, :file:`paste-actions.py`, :file:`notifications.py` and
+  the custom window icon in the kitty config directory
 
 
 0.49.2 [2026-10-01]

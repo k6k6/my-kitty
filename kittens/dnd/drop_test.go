@@ -4,10 +4,14 @@ package dnd
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"testing"
+	"time"
+
+	"github.com/kovidgoyal/kitty/tools/tui/loop"
 )
 
 // openDir opens a directory for use as an *os.File, closing it on test cleanup.
@@ -97,6 +101,305 @@ func TestLocalCopyHardlinkPolicy(t *testing.T) {
 				} else if string(data) != content {
 					t.Errorf("copied file %s has unexpected content", path)
 				}
+			}
+		})
+	}
+}
+
+func runLocalDrop(t *testing.T, dest string, uris []parsed_uri, action int, copy_mode string) (*dnd, error) {
+	t.Helper()
+	lp, err := loop.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &dnd{lp: lp, opts: &Options{CopyMode: copy_mode}, in_test_mode: true}
+	if err := d.setup_base_dir(dest); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		d.reset_drop()
+		d.remove_tdir()
+		d.drop_output_dir.Close()
+	})
+	d.drop_status = drop_status{action: action, reading_data: true, uri_list: uris}
+	if err := d.all_mime_data_dropped(); err != nil {
+		return d, err
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for d.drop_status.local_copy.ctx != nil {
+		if time.Now().After(deadline) {
+			t.Fatal("local drop did not complete")
+		}
+		if err := d.drop_on_wakeup(); err != nil {
+			return d, err
+		}
+		time.Sleep(time.Millisecond)
+	}
+	return d, nil
+}
+
+func TestLocalMoveToSourceDirectory(t *testing.T) {
+	for _, copy_mode := range []string{"auto", "independent"} {
+		for _, alias := range []string{"none", "source", "destination"} {
+			for _, name := range []string{"file.txt", "folder", "link", "dangling"} {
+				t.Run(copy_mode+"/"+alias+"/"+name, func(t *testing.T) {
+					dest := t.TempDir()
+					files := map[string]string{"file.txt": "original contents", "folder/nested/file.txt": "nested contents"}
+					links := map[string]string{"link": "file.txt", "dangling": "missing"}
+					buildTree(t, dest, files, links)
+					before, err := os.Lstat(filepath.Join(dest, name))
+					if err != nil {
+						t.Fatal(err)
+					}
+					source_dir, dest_dir := dest, dest
+					if alias != "none" {
+						path := filepath.Join(t.TempDir(), "alias")
+						if err := os.Symlink(dest, path); err != nil {
+							t.Fatal(err)
+						}
+						if alias == "source" {
+							source_dir = path
+						} else {
+							dest_dir = path
+						}
+					}
+					d, err := runLocalDrop(t, dest_dir, []parsed_uri{{kind: parsed_uri_file, path: filepath.Join(source_dir, name)}}, move_on_drop, copy_mode)
+					if err != nil {
+						t.Fatal(err)
+					}
+					for path, want := range files {
+						data, err := os.ReadFile(filepath.Join(dest, path))
+						if err != nil {
+							t.Errorf("source %s disappeared after moving to its own directory: %v", path, err)
+						} else if string(data) != want {
+							t.Errorf("source %s: got %q, want %q", path, data, want)
+						}
+					}
+					for path, want := range links {
+						if got, err := os.Readlink(filepath.Join(dest, path)); err != nil || got != want {
+							t.Errorf("symlink %s: got %q, %v, want %q", path, got, err, want)
+						}
+					}
+					if after, err := os.Lstat(filepath.Join(dest, name)); err != nil || !os.SameFile(before, after) {
+						t.Errorf("moving %s into its own directory changed its identity: %v", name, err)
+					}
+					if d.num_dropped_files != 0 {
+						t.Errorf("counted %d dropped files for a no-op move", d.num_dropped_files)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestLocalDropMixedSourceDirectories(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		action    int
+		copy_mode string
+	}{
+		{"copy-auto", copy_on_drop, "auto"},
+		{"copy-independent", copy_on_drop, "independent"},
+		{"move-auto", move_on_drop, "auto"},
+		{"move-independent", move_on_drop, "independent"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src, dest := t.TempDir(), t.TempDir()
+			local := map[string]string{"keep.txt": "keep file", "folder/keep.txt": "keep directory"}
+			incoming := map[string]string{"moved.txt": "incoming file", "incoming/nested.txt": "incoming directory", "linked.txt": "hardlinked file"}
+			buildTree(t, dest, local, nil)
+			buildTree(t, src, incoming, nil)
+			if err := os.Link(filepath.Join(src, "linked.txt"), filepath.Join(dest, "linked.txt")); err != nil {
+				t.Fatal(err)
+			}
+			uris := []parsed_uri{
+				{kind: parsed_uri_file, path: filepath.Join(dest, "keep.txt")},
+				{kind: parsed_uri_file, path: filepath.Join(dest, "folder")},
+				{kind: parsed_uri_file},
+				{kind: parsed_uri_data, mime: "text/plain", data: []byte("data URI contents")},
+			}
+			for _, name := range []string{"moved.txt", "incoming", "linked.txt"} {
+				uris = append(uris, parsed_uri{kind: parsed_uri_file, path: filepath.Join(src, name)})
+			}
+			d, err := runLocalDrop(t, dest, uris, tc.action, tc.copy_mode)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, files := range []map[string]string{local, incoming, {"data-uri-1.txt": "data URI contents"}} {
+				for path, want := range files {
+					if data, err := os.ReadFile(filepath.Join(dest, path)); err != nil || string(data) != want {
+						t.Errorf("dropped file %s: got %q, %v, want %q", path, data, err, want)
+					}
+				}
+			}
+			for path, want := range incoming {
+				data, err := os.ReadFile(filepath.Join(src, path))
+				if tc.action == move_on_drop {
+					if !os.IsNotExist(err) {
+						t.Errorf("source %s still exists after moving: %v", path, err)
+					}
+				} else if err != nil || string(data) != want {
+					t.Errorf("copy changed source %s: got %q, %v, want %q", path, data, err, want)
+				}
+			}
+			want_count := 6
+			if tc.action == move_on_drop {
+				want_count = 4
+			}
+			if d.num_dropped_files != want_count {
+				t.Errorf("got %d dropped files, want %d", d.num_dropped_files, want_count)
+			}
+		})
+	}
+}
+
+func TestLocalMoveMissingSource(t *testing.T) {
+	dest := t.TempDir()
+	uris := []parsed_uri{{kind: parsed_uri_file, path: filepath.Join(dest, "missing")}}
+	if _, err := runLocalDrop(t, dest, uris, move_on_drop, "auto"); !os.IsNotExist(err) {
+		t.Fatalf("got %v, want a missing source error", err)
+	}
+}
+
+func TestLocalCopyDuplicateBasenames(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		action    int
+		copy_mode string
+	}{
+		{"copy-auto", copy_on_drop, "auto"},
+		{"copy-independent", copy_on_drop, "independent"},
+		{"move-auto", move_on_drop, "auto"},
+		{"move-independent", move_on_drop, "independent"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, kind := range []string{"files", "directories", "repeated-source", "case-conflict", "existing-name"} {
+				t.Run(kind, func(t *testing.T) {
+					tmp := t.TempDir()
+					src := filepath.Join(tmp, "src")
+					dst := filepath.Join(tmp, "dst")
+					first, second := "first/file.txt", "second/file.txt"
+					switch kind {
+					case "directories":
+						first, second = "first/folder/file.txt", "second/folder/file.txt"
+					case "case-conflict":
+						second = "second/FILE.txt"
+					}
+					files := map[string]string{first: "FIRST original", second: "SECOND original"}
+					buildTree(t, src, files, nil)
+					if err := os.Mkdir(dst, 0755); err != nil {
+						t.Fatal(err)
+					}
+					paths := []string{filepath.Join(src, first), filepath.Join(src, second)}
+					want := []string{"FIRST original", "SECOND original"}
+					switch kind {
+					case "directories":
+						paths[0], paths[1] = filepath.Dir(paths[0]), filepath.Dir(paths[1])
+					case "repeated-source":
+						paths[1], want[1] = paths[0], want[0]
+					case "existing-name":
+						buildTree(t, dst, map[string]string{"file.txt": "existing", fmt.Sprintf(case_conflict_template, 1, "file.txt"): "existing conflict"}, nil)
+						want = append(want, "existing", "existing conflict")
+					}
+					if err := do_local_copy(context.Background(), openDir(t, dst), paths, tc.action, tc.copy_mode); err != nil {
+						t.Fatal(err)
+					}
+					for path, want := range files {
+						data, err := os.ReadFile(filepath.Join(src, path))
+						if err != nil {
+							t.Fatal(err)
+						}
+						if string(data) != want {
+							t.Errorf("source %s: got %q, want %q", path, data, want)
+						}
+					}
+					entries, err := os.ReadDir(dst)
+					if err != nil {
+						t.Fatal(err)
+					}
+					var contents []string
+					for _, entry := range entries {
+						path := filepath.Join(dst, entry.Name())
+						if kind == "directories" {
+							path = filepath.Join(path, "file.txt")
+						}
+						data, err := os.ReadFile(path)
+						if err != nil {
+							t.Fatal(err)
+						}
+						contents = append(contents, string(data))
+					}
+					if got, want := sortedStrings(contents), sortedStrings(want); !equalStringSlices(got, want) {
+						t.Errorf("dropped file contents: got %q, want %q", got, want)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestLocalCopySymlinkNameConflict(t *testing.T) {
+	for _, tc := range []struct {
+		name                         string
+		target_exists, symlink_first bool
+	}{
+		{"symlink-first", true, true},
+		{"file-first", true, false},
+		{"dangling-symlink-first", false, true},
+		{"dangling-file-first", false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			src, dst := filepath.Join(tmp, "src"), filepath.Join(tmp, "dst")
+			target := filepath.Join(src, "target.txt")
+			files := map[string]string{"file/file.txt": "FILE original"}
+			if tc.target_exists {
+				files["target.txt"] = "TARGET original"
+			}
+			buildTree(t, src, files, map[string]string{"link/file.txt": target})
+			if err := os.Mkdir(dst, 0755); err != nil {
+				t.Fatal(err)
+			}
+			paths := []string{filepath.Join(src, "file/file.txt"), filepath.Join(src, "link/file.txt")}
+			if tc.symlink_first {
+				paths[0], paths[1] = paths[1], paths[0]
+			}
+			if err := do_local_copy(context.Background(), openDir(t, dst), paths, copy_on_drop, "auto"); err != nil {
+				t.Fatal(err)
+			}
+			for path, want := range files {
+				if data, err := os.ReadFile(filepath.Join(src, path)); err != nil {
+					t.Fatal(err)
+				} else if string(data) != want {
+					t.Errorf("source %s: got %q, want %q", path, data, want)
+				}
+			}
+			if !tc.target_exists {
+				if _, err := os.Lstat(target); !os.IsNotExist(err) {
+					t.Errorf("dangling symlink target was created: %v", err)
+				}
+			}
+			entries, err := os.ReadDir(dst)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 2 {
+				t.Fatalf("got %d dropped entries, want 2", len(entries))
+			}
+			num_symlinks := 0
+			for _, entry := range entries {
+				path := filepath.Join(dst, entry.Name())
+				if entry.Type()&os.ModeSymlink != 0 {
+					num_symlinks++
+					if got, err := os.Readlink(path); err != nil || got != target {
+						t.Errorf("dropped symlink: got %q, %v, want %q", got, err, target)
+					}
+				} else if data, err := os.ReadFile(path); err != nil || string(data) != "FILE original" {
+					t.Errorf("dropped file: got %q, %v, want FILE original", data, err)
+				}
+			}
+			if num_symlinks != 1 {
+				t.Errorf("got %d dropped symlinks, want 1", num_symlinks)
 			}
 		})
 	}
