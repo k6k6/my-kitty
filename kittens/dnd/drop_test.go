@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -115,15 +116,30 @@ func runLocalDrop(t *testing.T, dest string, uris []parsed_uri, action int, copy
 // opened dest and before the drop is processed.
 func runLocalDropAfter(t *testing.T, dest string, uris []parsed_uri, action int, copy_mode string, before_drop func()) (*dnd, error) {
 	t.Helper()
+	return runLocalDropWithOptions(t, dest, uris, action, &Options{CopyMode: copy_mode}, before_drop)
+}
+
+// Like runLocalDrop but with overwrite confirmation enabled. If the drop
+// would overwrite existing files, it is left awaiting confirmation.
+func runLocalDropConfirming(t *testing.T, dest string, uris []parsed_uri, action int, copy_mode string) (*dnd, error) {
+	t.Helper()
+	return runLocalDropWithOptions(t, dest, uris, action, &Options{CopyMode: copy_mode, ConfirmDropOverwrite: true}, nil)
+}
+
+func runLocalDropWithOptions(t *testing.T, dest string, uris []parsed_uri, action int, opts *Options, before_drop func()) (*dnd, error) {
+	t.Helper()
 	lp, err := loop.New()
 	if err != nil {
 		t.Fatal(err)
 	}
-	d := &dnd{lp: lp, opts: &Options{CopyMode: copy_mode}, in_test_mode: true}
+	d := &dnd{lp: lp, opts: opts, in_test_mode: true}
 	if err := d.setup_base_dir(dest); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
+		if d.confirm_drop.staging_dir != nil {
+			d.confirm_drop.staging_dir.Close()
+		}
 		d.reset_drop()
 		d.remove_tdir()
 		d.drop_output_dir.Close()
@@ -146,6 +162,282 @@ func runLocalDropAfter(t *testing.T, dest string, uris []parsed_uri, action int,
 		time.Sleep(time.Millisecond)
 	}
 	return d, nil
+}
+
+func TestLocalMoveDestinationAliasesSource(t *testing.T) {
+	for _, mode := range []string{"auto", "independent"} {
+		for _, confirm := range []bool{false, true} {
+			for _, target := range []string{"source", "descendant", "nested", "other-source"} {
+				t.Run(fmt.Sprintf("%s/confirm=%t/%s", mode, confirm, target), func(t *testing.T) {
+					tmp := t.TempDir()
+					src, dst := filepath.Join(tmp, "src"), filepath.Join(tmp, "dst")
+					files := map[string]string{"folder/file.txt": "original", "folder/nested/child.txt": "nested", "other/file.txt": "other", "extra.txt": "extra"}
+					buildTree(t, src, files, nil)
+					buildTree(t, dst, map[string]string{"keep.txt": "keep"}, nil)
+					link, linkTarget := "folder", filepath.Join(src, "folder")
+					uris := []parsed_uri{{kind: parsed_uri_file, path: filepath.Join(src, "extra.txt")}, {kind: parsed_uri_file, path: filepath.Join(src, "folder")}}
+					switch target {
+					case "descendant":
+						linkTarget = filepath.Join(src, "folder/nested")
+					case "nested":
+						link, linkTarget = "folder/nested", filepath.Join(src, "folder/nested")
+					case "other-source":
+						linkTarget = filepath.Join(src, "other")
+						uris = append(uris, parsed_uri{kind: parsed_uri_file, path: linkTarget})
+					}
+					buildTree(t, dst, nil, map[string]string{link: linkTarget})
+					run := runLocalDrop
+					if confirm {
+						run = runLocalDropConfirming
+					}
+					d, err := run(t, dst, uris, move_on_drop, mode)
+					if err == nil && d.confirm_drop.staging_dir != nil {
+						err = d.drop_confirm(true)
+					}
+					if err == nil || !strings.Contains(err.Error(), "directory being moved") {
+						t.Errorf("expected a move source overlap error, got %v", err)
+					}
+					for name, want := range files {
+						if got, err := os.ReadFile(filepath.Join(src, name)); err != nil || string(got) != want {
+							t.Errorf("source %s: got %q, %v, want %q", name, got, err, want)
+						}
+					}
+					if _, err := os.Lstat(filepath.Join(dst, "extra.txt")); !os.IsNotExist(err) {
+						t.Errorf("unrelated file was placed before rejection: %v", err)
+					}
+					if got, err := os.Readlink(filepath.Join(dst, link)); err != nil || got != linkTarget {
+						t.Errorf("destination link: got %q, %v", got, err)
+					}
+					if got, err := os.ReadFile(filepath.Join(dst, "keep.txt")); err != nil || string(got) != "keep" {
+						t.Errorf("existing destination file: got %q, %v", got, err)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestLocalDropSafeDestinationSymlinks(t *testing.T) {
+	for _, mode := range []string{"auto", "independent"} {
+		for _, confirm := range []bool{false, true} {
+			for _, target := range []string{"copy-to-source", "move-to-unrelated"} {
+				t.Run(fmt.Sprintf("%s/confirm=%t/%s", mode, confirm, target), func(t *testing.T) {
+					tmp := t.TempDir()
+					src, dst, other := filepath.Join(tmp, "src"), filepath.Join(tmp, "dst"), filepath.Join(tmp, "other")
+					buildTree(t, src, map[string]string{"folder/file.txt": "original", "folder/nested/child.txt": "nested"}, nil)
+					buildTree(t, other, map[string]string{"file.txt": "old", "keep.txt": "keep"}, nil)
+					action, linkTarget := copy_on_drop, filepath.Join(src, "folder")
+					if target == "move-to-unrelated" {
+						action, linkTarget = move_on_drop, other
+					}
+					buildTree(t, dst, nil, map[string]string{"folder": linkTarget})
+					run := runLocalDrop
+					if confirm {
+						run = runLocalDropConfirming
+					}
+					d, err := run(t, dst, []parsed_uri{{kind: parsed_uri_file, path: filepath.Join(src, "folder")}}, action, mode)
+					if err == nil && confirm {
+						if d.confirm_drop.staging_dir == nil {
+							t.Fatal("expected overwrite confirmation")
+						}
+						err = d.drop_confirm(true)
+					}
+					if err != nil {
+						t.Fatal(err)
+					}
+					for name, want := range map[string]string{"file.txt": "original", "nested/child.txt": "nested"} {
+						if got, err := os.ReadFile(filepath.Join(dst, "folder", name)); err != nil || string(got) != want {
+							t.Errorf("destination %s: got %q, %v", name, got, err)
+						}
+					}
+					if action == move_on_drop {
+						if _, err := os.Lstat(filepath.Join(src, "folder")); !os.IsNotExist(err) {
+							t.Errorf("source still present: %v", err)
+						}
+						if got, err := os.ReadFile(filepath.Join(other, "keep.txt")); err != nil || string(got) != "keep" {
+							t.Errorf("existing merge target file: got %q, %v", got, err)
+						}
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestLocalMoveDestinationAliasAfterConfirmation(t *testing.T) {
+	for _, mode := range []string{"auto", "independent"} {
+		t.Run(mode, func(t *testing.T) {
+			tmp := t.TempDir()
+			src, dst, other := filepath.Join(tmp, "src"), filepath.Join(tmp, "dst"), filepath.Join(tmp, "other")
+			buildTree(t, src, map[string]string{"folder/file.txt": "original"}, nil)
+			buildTree(t, other, map[string]string{"file.txt": "old"}, nil)
+			buildTree(t, dst, nil, map[string]string{"folder": other})
+			d, err := runLocalDropConfirming(t, dst, []parsed_uri{{kind: parsed_uri_file, path: filepath.Join(src, "folder")}}, move_on_drop, mode)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(d.confirm_drop.overwrites) == 0 {
+				t.Fatal("expected overwrite confirmation")
+			}
+			link := filepath.Join(dst, "folder")
+			if err := os.Remove(link); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(filepath.Join(src, "folder"), link); err != nil {
+				t.Fatal(err)
+			}
+			if err := d.drop_confirm(true); err == nil || !strings.Contains(err.Error(), "directory being moved") {
+				t.Errorf("expected a move source overlap error, got %v", err)
+			}
+			if got, err := os.ReadFile(filepath.Join(src, "folder/file.txt")); err != nil || string(got) != "original" {
+				t.Errorf("source: got %q, %v", got, err)
+			}
+			if got, err := os.ReadFile(filepath.Join(other, "file.txt")); err != nil || string(got) != "old" {
+				t.Errorf("original destination: got %q, %v", got, err)
+			}
+		})
+	}
+}
+
+func TestLocalMoveSourceRemovedWhileAwaitingConfirmation(t *testing.T) {
+	tmp := t.TempDir()
+	src, dst := filepath.Join(tmp, "src"), filepath.Join(tmp, "dst")
+	buildTree(t, src, map[string]string{"a/file.txt": "a", "b/file.txt": "b"}, nil)
+	buildTree(t, dst, map[string]string{"a/file.txt": "old"}, nil)
+	uris := []parsed_uri{{kind: parsed_uri_file, path: filepath.Join(src, "a")}, {kind: parsed_uri_file, path: filepath.Join(src, "b")}}
+	d, err := runLocalDropConfirming(t, dst, uris, move_on_drop, "independent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.confirm_drop.staging_dir == nil {
+		t.Fatal("expected overwrite confirmation")
+	}
+	if err := os.RemoveAll(filepath.Join(src, "b")); err != nil {
+		t.Fatal(err)
+	}
+	// The staged copy is now the only copy of b, so the drop must still succeed
+	if err := d.drop_confirm(true); err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]string{"a/file.txt": "a", "b/file.txt": "b"} {
+		if got, err := os.ReadFile(filepath.Join(dst, name)); err != nil || string(got) != want {
+			t.Errorf("destination %s: got %q, %v, want %q", name, got, err, want)
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(src, "a")); !os.IsNotExist(err) {
+		t.Errorf("move source still present: %v", err)
+	}
+}
+
+func TestLocalMoveDirectoryAndFileThroughAlias(t *testing.T) {
+	for _, mode := range []string{"auto", "independent"} {
+		for _, confirm := range []bool{false, true} {
+			for _, selection := range []string{"folder-only", "folder-first", "file-first"} {
+				t.Run(fmt.Sprintf("%s/confirm=%t/%s", mode, confirm, selection), func(t *testing.T) {
+					tmp := t.TempDir()
+					src, dst := filepath.Join(tmp, "src"), filepath.Join(tmp, "dst")
+					buildTree(t, src, map[string]string{"folder/file.txt": "directory payload", "file.txt": "top level payload"}, nil)
+					buildTree(t, dst, nil, map[string]string{"folder": src})
+					uris := []parsed_uri{{kind: parsed_uri_file, path: filepath.Join(src, "folder")}}
+					if selection != "folder-only" {
+						file := parsed_uri{kind: parsed_uri_file, path: filepath.Join(src, "file.txt")}
+						if selection == "file-first" {
+							uris = append([]parsed_uri{file}, uris...)
+						} else {
+							uris = append(uris, file)
+						}
+					}
+					run := runLocalDrop
+					if confirm {
+						run = runLocalDropConfirming
+					}
+					d, err := run(t, dst, uris, move_on_drop, mode)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if confirm {
+						if d.confirm_drop.staging_dir == nil {
+							t.Fatal("expected overwrite confirmation")
+						}
+						if err := d.drop_confirm(true); err != nil {
+							t.Fatal(err)
+						}
+					}
+					if got, err := os.ReadFile(filepath.Join(dst, "folder/file.txt")); err != nil || string(got) != "directory payload" {
+						t.Errorf("merged directory payload: got %q, %v", got, err)
+					}
+					if selection != "folder-only" {
+						if got, err := os.ReadFile(filepath.Join(dst, "file.txt")); err != nil || string(got) != "top level payload" {
+							t.Errorf("top level payload: got %q, %v", got, err)
+						}
+					}
+					if _, err := os.Lstat(filepath.Join(src, "folder")); !os.IsNotExist(err) {
+						t.Errorf("move source directory still present: %v", err)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestLocalMoveSourceReplacedWhileAwaitingConfirmation(t *testing.T) {
+	for _, mode := range []string{"auto", "independent"} {
+		for _, directory := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/directory=%t", mode, directory), func(t *testing.T) {
+				tmp := t.TempDir()
+				src, dst := filepath.Join(tmp, "src"), filepath.Join(tmp, "dst")
+				name := "item"
+				if directory {
+					name = "item/file.txt"
+				}
+				buildTree(t, src, map[string]string{name: "original"}, nil)
+				buildTree(t, dst, map[string]string{name: "old destination"}, nil)
+				source := filepath.Join(src, "item")
+				d, err := runLocalDropConfirming(t, dst, []parsed_uri{{kind: parsed_uri_file, path: source}}, move_on_drop, mode)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if d.confirm_drop.staging_dir == nil {
+					t.Fatal("expected overwrite confirmation")
+				}
+				if err := os.Rename(source, source+".original"); err != nil {
+					t.Fatal(err)
+				}
+				buildTree(t, src, map[string]string{name: "replacement"}, nil)
+				if err := d.drop_confirm(true); err != nil {
+					t.Fatal(err)
+				}
+				if got, err := os.ReadFile(filepath.Join(src, name)); err != nil || string(got) != "replacement" {
+					t.Errorf("replacement source: got %q, %v", got, err)
+				}
+				if got, err := os.ReadFile(filepath.Join(dst, name)); err != nil || string(got) != "original" {
+					t.Errorf("destination: got %q, %v", got, err)
+				}
+			})
+		}
+	}
+}
+
+func TestMoveSourceReplacementReusingInode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "item")
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	birth := birth_time(path, info)
+	if birth.IsZero() {
+		t.Skip("filesystem does not record birth times")
+	}
+	if got, err := (move_source{info, birth}).current(path); err != nil || got == nil {
+		t.Fatalf("unchanged source not recognized: %v, %v", got, err)
+	}
+	// A replacement with the same inode number differs only in birth time
+	if got, err := (move_source{info, birth.Add(-time.Second)}).current(path); err != nil || got != nil {
+		t.Fatalf("replacement recognized as the source: %v, %v", got, err)
+	}
 }
 
 func TestLocalMoveToSourceDirectory(t *testing.T) {
@@ -634,7 +926,7 @@ func TestFindOverwrites_NoOverlap(t *testing.T) {
 	srcDir := openDir(t, src)
 	dstDir := openDir(t, dst)
 
-	got, err := find_overwrites(srcDir, dstDir)
+	got, err := find_overwrites(srcDir, dstDir, nil)
 	if err != nil {
 		t.Fatalf("find_overwrites: %v", err)
 	}
@@ -657,12 +949,54 @@ func TestFindOverwrites_FileOverlap(t *testing.T) {
 	srcDir := openDir(t, src)
 	dstDir := openDir(t, dst)
 
-	got, err := find_overwrites(srcDir, dstDir)
+	got, err := find_overwrites(srcDir, dstDir, nil)
 	if err != nil {
 		t.Fatalf("find_overwrites: %v", err)
 	}
 	if len(got) != 1 || got[0] != "shared.txt" {
 		t.Errorf("expected [shared.txt], got %v", got)
+	}
+}
+
+func TestFindOverwritesFilesystemAliases(t *testing.T) {
+	for _, tc := range []struct{ name, src, dest string }{
+		{"case", "report.txt", "Report.txt"},
+		{"unicode", "cafe\u0301.txt", "caf\u00e9.txt"},
+		{"directory", "folder/file.txt", "Folder/file.txt"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src, dest := t.TempDir(), t.TempDir()
+			buildTree(t, src, map[string]string{tc.src: "incoming"}, nil)
+			buildTree(t, dest, map[string]string{tc.dest: "original"}, nil)
+			alias, err := os.Stat(filepath.Join(dest, tc.src))
+			if os.IsNotExist(err) {
+				t.Skip("destination filesystem does not alias these names")
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			original, err := os.Stat(filepath.Join(dest, tc.dest))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !os.SameFile(alias, original) {
+				t.Fatal("names do not refer to the same destination file")
+			}
+			got, err := find_overwrites(openDir(t, src), openDir(t, dest), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// The existing entry is reported under the name it is stored as,
+			// which some filesystems normalize.
+			entries, err := os.ReadDir(dest)
+			if err != nil || len(entries) != 1 {
+				t.Fatalf("unexpected destination contents: %v %v", entries, err)
+			}
+			_, rest, _ := strings.Cut(tc.dest, "/")
+			want := filepath.Join(entries[0].Name(), rest)
+			if len(got) != 1 || got[0] != want {
+				t.Errorf("got overwrites %q, want [%q]", got, want)
+			}
+		})
 	}
 }
 
@@ -683,7 +1017,7 @@ func TestFindOverwrites_DirsNotReported(t *testing.T) {
 	srcDir := openDir(t, src)
 	dstDir := openDir(t, dst)
 
-	got, err := find_overwrites(srcDir, dstDir)
+	got, err := find_overwrites(srcDir, dstDir, nil)
 	if err != nil {
 		t.Fatalf("find_overwrites: %v", err)
 	}
@@ -737,7 +1071,7 @@ func TestFindOverwrites_NestedTree(t *testing.T) {
 	srcDir := openDir(t, src)
 	dstDir := openDir(t, dst)
 
-	got, err := find_overwrites(srcDir, dstDir)
+	got, err := find_overwrites(srcDir, dstDir, nil)
 	if err != nil {
 		t.Fatalf("find_overwrites: %v", err)
 	}
@@ -764,7 +1098,7 @@ func TestFindOverwrites_SymlinksTransferredAsIs(t *testing.T) {
 	srcDir := openDir(t, src)
 	dstDir := openDir(t, dst)
 
-	got, err := find_overwrites(srcDir, dstDir)
+	got, err := find_overwrites(srcDir, dstDir, nil)
 	if err != nil {
 		t.Fatalf("find_overwrites: %v", err)
 	}
@@ -788,7 +1122,7 @@ func TestFindOverwrites_DirVsFile(t *testing.T) {
 	srcDir := openDir(t, src)
 	dstDir := openDir(t, dst)
 
-	got, err := find_overwrites(srcDir, dstDir)
+	got, err := find_overwrites(srcDir, dstDir, nil)
 	if err != nil {
 		t.Fatalf("find_overwrites: %v", err)
 	}
@@ -798,7 +1132,96 @@ func TestFindOverwrites_DirVsFile(t *testing.T) {
 	}
 }
 
+// TestFindOverwrites_FileVsDir verifies that a dropped file that would
+// replace an existing directory is an error up front, as rename_contents
+// cannot replace a directory with a file.
+func TestFindOverwrites_FileVsDir(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	buildTree(t, src, map[string]string{"conflict": "file"}, nil)
+	buildTree(t, dst, map[string]string{"conflict/x.txt": "x"}, nil)
+	if got, err := find_overwrites(openDir(t, src), openDir(t, dst), nil); err == nil {
+		t.Fatalf("expected an error, got overwrites %v", got)
+	}
+}
+
+// TestSymlinkToDirInDestIsMerged verifies that a symlink to a directory in
+// the destination is merged into by rename_contents and that find_overwrites
+// reports the files in the symlink target that will be overwritten.
+func TestSymlinkToDirInDestIsMerged(t *testing.T) {
+	tmp := t.TempDir()
+	src, dst, target := filepath.Join(tmp, "src"), filepath.Join(tmp, "dst"), filepath.Join(tmp, "target")
+	buildTree(t, src, map[string]string{"folder/file.txt": "new", "folder/new.txt": "new"}, nil)
+	buildTree(t, target, map[string]string{"file.txt": "old", "other.txt": "old"}, nil)
+	buildTree(t, dst, nil, map[string]string{"folder": target})
+	srcDir, dstDir := openDir(t, src), openDir(t, dst)
+
+	got, err := find_overwrites(srcDir, dstDir, nil)
+	if err != nil {
+		t.Fatalf("find_overwrites: %v", err)
+	}
+	if want := []string{filepath.Join("folder", "file.txt")}; !equalStringSlices(got, want) {
+		t.Errorf("find_overwrites: got %v, want %v", got, want)
+	}
+	if err := rename_contents(srcDir, dstDir); err != nil {
+		t.Fatalf("rename_contents: %v", err)
+	}
+	if st, err := os.Lstat(filepath.Join(dst, "folder")); err != nil || st.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("dst/folder is no longer a symlink: %v %v", st, err)
+	}
+	for name, want := range map[string]string{"file.txt": "new", "new.txt": "new", "other.txt": "old"} {
+		if data, err := os.ReadFile(filepath.Join(target, name)); err != nil || string(data) != want {
+			t.Errorf("target/%s: got %q %v, want %q", name, data, err, want)
+		}
+	}
+}
+
 // --- rename_contents tests ---
+
+// TestRenameContents_DirReplacesNonDir verifies that a dropped directory
+// replaces an existing file or dangling symlink of the same name.
+func TestRenameContents_DirReplacesNonDir(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		files, symlinks map[string]string
+	}{
+		{"file", map[string]string{"conflict": "file"}, nil},
+		{"dangling symlink", nil, map[string]string{"conflict": "nonexistent"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src, dst := t.TempDir(), t.TempDir()
+			buildTree(t, src, map[string]string{"conflict/a.txt": "a"}, nil)
+			buildTree(t, dst, tc.files, tc.symlinks)
+			if err := rename_contents(openDir(t, src), openDir(t, dst)); err != nil {
+				t.Fatalf("rename_contents: %v", err)
+			}
+			if data, err := os.ReadFile(filepath.Join(dst, "conflict", "a.txt")); err != nil || string(data) != "a" {
+				t.Errorf("dst/conflict/a.txt: got %q %v", data, err)
+			}
+		})
+	}
+}
+
+// TestRenameContents_FileVsDir verifies that replacing an existing directory
+// with a file fails and leaves the directory intact.
+func TestRenameContents_FileVsDir(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	buildTree(t, src, map[string]string{"conflict": "file"}, nil)
+	buildTree(t, dst, map[string]string{"conflict/x.txt": "x"}, nil)
+	if err := rename_contents(openDir(t, src), openDir(t, dst)); err == nil {
+		t.Fatal("expected an error")
+	}
+	if _, err := os.Stat(filepath.Join(dst, "conflict", "x.txt")); err != nil {
+		t.Errorf("dst/conflict/x.txt missing: %v", err)
+	}
+}
+
+func TestUniqifyChildNamesNormalization(t *testing.T) {
+	got := uniqify_child_names([]string{"caf\u00e9.txt", "Cafe\u0301.txt", "other"}, false)
+	want := []string{"caf\u00e9.txt", fmt.Sprintf(case_conflict_template, 1, "Cafe\u0301.txt"), "other"}
+	if !equalStringSlices(got, want) {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
 
 // TestRenameContents_SimpleFiles verifies that plain files are moved from src
 // to dst.
@@ -989,4 +1412,34 @@ func equalStringSlices(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// TestSetupBaseDirDetectsNameAliases verifies that setup_base_dir detects
+// whether the filesystem treats names differing in case or Unicode
+// normalization as aliases and leaves no probe files behind.
+func TestSetupBaseDirDetectsNameAliases(t *testing.T) {
+	dest := t.TempDir()
+	buildTree(t, dest, map[string]string{"Probe": "", "é": ""}, nil)
+	_, cerr := os.Lstat(filepath.Join(dest, "probe"))
+	_, nerr := os.Lstat(filepath.Join(dest, "é"))
+	want := os.IsNotExist(cerr) && os.IsNotExist(nerr)
+	for _, name := range []string{"Probe", "é"} {
+		if err := os.Remove(filepath.Join(dest, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d, err := runLocalDrop(t, dest, nil, copy_on_drop, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.is_case_sensitive_filesystem != want {
+		t.Errorf("is_case_sensitive_filesystem: got %v, want %v", d.is_case_sensitive_filesystem, want)
+	}
+	entries, err := os.ReadDir(d.base_tempdir.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("probe files left in the base temporary directory: %v", entries)
+	}
 }
