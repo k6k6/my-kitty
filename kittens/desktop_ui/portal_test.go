@@ -21,3 +21,27 @@ func TestInvalidAccentColor(t *testing.T) {
 		t.Fatalf("Invalid accent_color in config changed the default to: %#v", c.Accent_color)
 	}
 }
+
+func TestDBusServiceExecLine(t *testing.T) {
+	for _, tc := range []struct{ exe, want string }{
+		{"/opt/kitty/kitten", `/opt/kitty/kitten a`},
+		{"/opt/kitty app/kitten", `'/opt/kitty app/kitten' a`},
+		{"/opt/kitty'app/kitten", `'/opt/kitty'"'"'app/kitten' a`},
+		{`/opt/kitty"app/kitten`, `'/opt/kitty"app/kitten' a`},
+		{`/opt/kitty\app/kitten`, `'/opt/kitty\\app/kitten' a`},
+		{"/opt/kitty$app/kitten", `'/opt/kitty$app/kitten' a`},
+		{"/opt/kitty\tapp/kitten", `'/opt/kitty\tapp/kitten' a`},
+		{"/opt/kitty\napp/kitten", `'/opt/kitty\napp/kitten' a`},
+	} {
+		got, err := dbus_service_exec_line(tc.exe, "a")
+		if err != nil {
+			t.Fatalf("Unexpected error for %#v: %s", tc.exe, err)
+		}
+		if got != tc.want {
+			t.Fatalf("Exec line for %#v: got %#v want %#v", tc.exe, got, tc.want)
+		}
+	}
+	if _, err := dbus_service_exec_line("/opt/kitty\rapp/kitten"); err == nil {
+		t.Fatalf("No error for path containing a carriage return")
+	}
+}
