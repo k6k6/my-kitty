@@ -228,7 +228,7 @@ you use a decent Wayland compositor.
 Detailed list of changes
 -------------------------------------
 
-0.50.0 [future]
+0.50.0 [2026-11-03]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 - Allow docking kitty windows to the edges of other windows or of the tab, for
@@ -247,12 +247,6 @@ Detailed list of changes
   alphabetical order and new options for `kitten @ detach-window` and the
   :ac:`detach_window` action to send windows to a named tab, creating it if
   needed (:iss:`10627`)
-
-- Support the `Program Status Protocol (OSC 7501)
-  <https://www.superlogical.com/rex/docs/build/program-status>`__ that lets
-  programs report whether they are working, finished, failed or blocked waiting
-  on the user. Shown in the tab bar via a new :code:`tab.program_status` field
-  for :opt:`tab_title_template`, see :ref:`program_status`
 
 - Wayland: The client side window decorations used on compositors such as
   GNOME now look like native GNOME decorations and follow the desktop titlebar
@@ -282,6 +276,12 @@ Detailed list of changes
   clients to detect support for individual protocol features, such as
   animation and Unicode placeholders, via the new ``e`` query key, see
   :ref:`graphics_query_features` (:iss:`9379`, :iss:`10732`)
+
+- Support the `Program Status Protocol (OSC 7501)
+  <https://www.superlogical.com/rex/docs/build/program-status>`__ that lets
+  programs report whether they are working, finished, failed or blocked waiting
+  on the user. Shown in the tab bar via a new :code:`tab.program_status` field
+  for :opt:`tab_title_template`, see :ref:`program_status`
 
 - :ref:`Automatic color themes <auto_color_scheme>`: When the system switches
   between light and dark, keep colors set by programs running in a window, by
@@ -432,6 +432,9 @@ Detailed list of changes
   early. :ac:`detach_tab` now shows custom titles in the OS Window chooser
   (:pull:`10640`)
 
+- Fix render jitter when scrolled back with a partial line and the client is
+  using the synchronised rendering escape code (:iss:`10794`)
+
 - Fix bold or italic Nerd Font icons sometimes being rendered using glyphs
   from an unrelated font, the cursor trail not always being shown when focus
   moves to a different window, :opt:`watcher` entries not being removed on
@@ -517,9 +520,10 @@ Detailed list of changes
 - macOS: Fix padding rendering black after sleep, OS windows not staying on all
   spaces, a duplicate path when dropping items from Apple Mail, emoji from a
   monochrome emoji font such as Noto Emoji not using the foreground color, a
-  memory leak and kitty freezing when opening a new window while another entry
+  memory leak, reloading config causing Apple injected shortcuts to not work
+  and kitty freezing when opening a new window while another entry
   in :file:`/dev` is stuck (:iss:`10708`, :iss:`10581`, :iss:`10628`,
-  :iss:`10673`, :iss:`10741`, :iss:`10757`)
+  :iss:`10673`, :iss:`10741`, :iss:`10757`, :iss:`10793`)
 
 - zsh: Respect the user's ``descriptions`` format style for completion group
   headings, fixing literal ``%B`` markers appearing with fzf-tab, and fix a
