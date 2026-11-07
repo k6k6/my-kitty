@@ -90,6 +90,7 @@ init_overlay_line(Screen *self, index_type columns, bool keep_active) {
     if (!keep_active) {
         self->overlay_line.is_active = false;
         self->overlay_line.xnum = 0;
+        self->overlay_line.preedit_cursor = -1;
     }
     self->overlay_line.is_dirty = true;
     self->overlay_line.ynum = 0;
@@ -1981,7 +1982,9 @@ screen_toggle_screen_buffer(Screen *self, bool save_cursor, bool clear_alt_scree
         self->grman = self->alt_grman;
         screen_cursor_position(self, 1, 1);
         cursor_reset(self->cursor);
+        self->alternate_screen.entered_at = monotonic();
     } else {
+        self->alternate_screen.exited_at = monotonic();
         self->linebuf = self->main_linebuf;
         self->tabstops = self->main_tabstops;
         self->key_encoding_flags = self->main_key_encoding_flags;
@@ -3198,6 +3201,28 @@ screen_invert_colors(Screen *self) {
     return self->paused_rendering.expires_at ? self->paused_rendering.inverted : (self->modes.mDECSCNM ? true : false);
 }
 
+// Fire the custom shader bell event, independently of the visual bell, but
+// only if the window is visible, i.e. in the active tab and not hidden by an
+// overlay or the layout, as otherwise the shader has nothing to draw over.
+static void
+fire_bell_shader_event(id_type window_id) {
+    for (size_t o = 0; o < global_state.num_os_windows; o++) {
+        OSWindow *osw = global_state.os_windows + o;
+        if (osw->active_tab >= osw->num_tabs) continue;
+        Tab *tab = osw->tabs + osw->active_tab;
+        for (size_t i = 0; i < tab->num_windows; i++) {
+            if (tab->windows[i].id == window_id) {
+                if (tab->windows[i].visible) {
+                    osw->shader_anim_event_registry |= (1u << SHADER_ANIM_EVENT_BELL_IN_WINDOW);
+                    osw->last_bell_window_id = window_id;
+                    wakeup_main_loop();
+                }
+                return;
+            }
+        }
+    }
+}
+
 void
 screen_bell(Screen *self) {
     if (self->ignore_bells.start) {
@@ -3210,6 +3235,7 @@ screen_bell(Screen *self) {
     }
     request_window_attention(self->window_id, OPT(enable_audio_bell));
     if (OPT(visual_bell_duration) > 0.0f) self->start_visual_bell_at = monotonic();
+    if (self->window_id) fire_bell_shader_event(self->window_id);
     CALLBACK("on_bell", NULL);
 }
 
@@ -3633,6 +3659,14 @@ parse_prompt_mark(Screen *self, char *buf, PromptKind *pk) {
     }
 }
 
+static void
+mark_command_finished(Screen *self) {
+    if (self->command_state.running) {
+        self->command_state.running = false;
+        self->command_state.finished_at = monotonic();
+    }
+}
+
 void
 shell_prompt_marking(Screen *self, char *buf) {
     if (self->cursor->y < self->lines) {
@@ -3644,10 +3678,15 @@ shell_prompt_marking(Screen *self, char *buf) {
                 self->prompt_settings.redraws_prompts_at_all = 1;
                 parse_prompt_mark(self, buf + 1, &pk);
                 self->linebuf->line_attrs[self->cursor->y].prompt_kind = pk;
-                if (pk == PROMPT_START) CALLBACK("cmd_output_marking", "O", Py_False);
+                if (pk == PROMPT_START) {
+                    mark_command_finished(self);
+                    CALLBACK("cmd_output_marking", "O", Py_False);
+                }
             } break;
             case 'C': {
                 self->linebuf->line_attrs[self->cursor->y].prompt_kind = OUTPUT_START;
+                self->command_state.running = true;
+                self->command_state.started_at = monotonic();
                 const char *cmdline = "";
                 if (strstr(buf + 1, ";cmdline") == buf + 1) { cmdline = buf + 2; }
                 RAII_PyObject(c, PyUnicode_DecodeUTF8(cmdline, strlen(cmdline), "replace"));
@@ -3657,6 +3696,7 @@ shell_prompt_marking(Screen *self, char *buf) {
             } break;
             case 'D': {
                 const char *exit_status = buf[1] == ';' ? buf + 2 : "";
+                mark_command_finished(self);
                 CALLBACK("cmd_output_marking", "Os", Py_None, exit_status);
             } break;
         }
@@ -5033,10 +5073,34 @@ deactivate_overlay_line(Screen *self) {
     self->overlay_line.ynum = 0;
     self->overlay_line.xstart = 0;
     self->overlay_line.cursor_x = 0;
+    self->overlay_line.preedit_cursor = -1;
+}
+
+static index_type
+overlay_line_cursor_x(const Screen *self) {
+    // The column at which the cursor is shown while the pre-edit text is
+    // active: at the IME cursor if known, otherwise after the pre-edit text.
+    // This is computed without drawing the pre-edit text as the cursor
+    // position is collected for rendering before the overlay is drawn.
+    const OverlayLine *ol = &self->overlay_line;
+    const index_type columns_exceeded = ol->text_len <= self->columns ? 0 : ol->text_len - self->columns;
+    const index_type start = screen_overlay_line_start(self);
+    index_type width_before_cursor = ol->text_len;
+    if (ol->overlay_text && ol->preedit_cursor >= 0 && ol->preedit_cursor < PyUnicode_GET_LENGTH(ol->overlay_text)) {
+        RAII_PyObject(prefix, PyUnicode_Substring(ol->overlay_text, 0, ol->preedit_cursor));
+        RAII_PyObject(width, prefix ? wcswidth_std(NULL, prefix) : NULL);
+        if (width) {
+            const long w = PyLong_AsLong(width);
+            if (w >= 0) width_before_cursor = MIN((index_type)w, ol->text_len);
+        }
+        if (PyErr_Occurred()) PyErr_Print();
+    }
+    if (width_before_cursor < columns_exceeded) return 0;
+    return MIN(start + width_before_cursor - columns_exceeded, self->columns);
 }
 
 void
-screen_update_overlay_text(Screen *self, const char *utf8_text) {
+screen_update_overlay_text(Screen *self, const char *utf8_text, int preedit_cursor) {
     if (screen_is_overlay_active(self)) deactivate_overlay_line(self);
     if (!utf8_text || !utf8_text[0]) return;
     PyObject *text = PyUnicode_FromString(utf8_text);
@@ -5050,7 +5114,8 @@ screen_update_overlay_text(Screen *self, const char *utf8_text) {
     self->overlay_line.xstart = self->cursor->x;
     self->overlay_line.xnum = !text_len ? 0 : PyLong_AsLong(text_len);
     self->overlay_line.text_len = self->overlay_line.xnum;
-    self->overlay_line.cursor_x = MIN(self->overlay_line.xstart + self->overlay_line.xnum, self->columns);
+    self->overlay_line.preedit_cursor = preedit_cursor;
+    self->overlay_line.cursor_x = overlay_line_cursor_x(self);
     self->overlay_line.ynum = self->cursor->y;
     cursor_copy_to(self->cursor, &(self->overlay_line.original_line.cursor));
     linebuf_mark_line_dirty(self->linebuf, self->overlay_line.ynum);
@@ -5159,7 +5224,7 @@ screen_draw_overlay_line(Screen *self) {
         }
         self->overlay_line.xnum += len;
     }
-    self->overlay_line.cursor_x = self->cursor->x;
+    self->overlay_line.cursor_x = overlay_line_cursor_x(self);
     self->cursor->sgr.italic = orig_italic;
     self->cursor->sgr.decoration = orig_decoration;
     self->cursor->sgr.decoration_fg = orig_decoration_fg;
@@ -5176,7 +5241,7 @@ update_overlay_position(Screen *self) {
         if (self->cursor->x != self->overlay_line.xstart) {
             cursor_update = true;
             self->overlay_line.xstart = self->cursor->x;
-            self->overlay_line.cursor_x = MIN(self->overlay_line.xstart + self->overlay_line.xnum, self->columns);
+            self->overlay_line.cursor_x = overlay_line_cursor_x(self);
         }
         if (self->cursor->y != self->overlay_line.ynum) {
             cursor_update = true;
@@ -7131,20 +7196,39 @@ static PyObject *
 test_draw_overlay_line(Screen *self, PyObject *args) {
     PyObject *text;
     unsigned int xstart, ynum;
-    if (!PyArg_ParseTuple(args, "UII", &text, &xstart, &ynum)) return NULL;
+    int preedit_cursor = -1;
+    if (!PyArg_ParseTuple(args, "UII|i", &text, &xstart, &ynum, &preedit_cursor)) return NULL;
     if (ynum >= self->lines || xstart >= self->columns) {
         PyErr_SetString(PyExc_IndexError, "ynum or xstart out of range");
+        return NULL;
+    }
+    RAII_PyObject(text_width, wcswidth_std(NULL, text));
+    if (!text_width) return NULL;
+    const long width = PyLong_AsLong(text_width);
+    if (width < 0) {
+        if (!PyErr_Occurred()) PyErr_SetString(PyExc_ValueError, "pre-edit text has negative width");
         return NULL;
     }
     Py_INCREF(text);
     Py_XDECREF(self->overlay_line.overlay_text);
     self->overlay_line.overlay_text = text;
-    self->overlay_line.text_len = (index_type)PyUnicode_GET_LENGTH(text);
+    self->overlay_line.text_len = (index_type)width;
     self->overlay_line.xstart = xstart;
     self->overlay_line.ynum = ynum;
+    self->overlay_line.preedit_cursor = preedit_cursor;
     self->overlay_line.is_active = true;
     screen_draw_overlay_line(self);
-    Py_RETURN_NONE;
+    return PyLong_FromUnsignedLong(self->overlay_line.cursor_x);
+}
+
+static PyObject *
+test_update_overlay_text(Screen *self, PyObject *args) {
+    const char *text;
+    int preedit_cursor = -1;
+    if (!PyArg_ParseTuple(args, "s|i", &text, &preedit_cursor)) return NULL;
+    screen_update_overlay_text(self, text, preedit_cursor);
+    // Nothing is drawn here, the cursor position must be correct without drawing
+    return PyLong_FromUnsignedLong(self->overlay_line.cursor_x);
 }
 
 static PyObject *
@@ -7299,6 +7383,7 @@ static PyMethodDef methods[] = {
     METHODB(test_commit_write_buffer, METH_VARARGS),
     METHODB(test_parse_written_data, METH_VARARGS),
     METHODB(test_draw_overlay_line, METH_VARARGS),
+    METHODB(test_update_overlay_text, METH_VARARGS),
     METHODB(restore_scrollback, METH_O),
     METHODB(cursor_prompt_line, METH_NOARGS),
     MND(overlay_line_start, METH_NOARGS) MND(line_edge_colors, METH_NOARGS) MND(ime_text_around_cursor, METH_NOARGS) MND(line, METH_O)
@@ -7361,6 +7446,11 @@ static PyMemberDef members[] = {
     {"linebuf", T_OBJECT_EX, offsetof(Screen, linebuf), READONLY, "linebuf"},
     {"main_linebuf", T_OBJECT_EX, offsetof(Screen, main_linebuf), READONLY, "main_linebuf"},
     {"historybuf", T_OBJECT_EX, offsetof(Screen, historybuf), READONLY, "historybuf"},
+    {"command_running", T_BOOL, offsetof(Screen, command_state.running), READONLY, "command_running"},
+    {"command_started_at", T_LONGLONG, offsetof(Screen, command_state.started_at), READONLY, "command_started_at"},
+    {"command_finished_at", T_LONGLONG, offsetof(Screen, command_state.finished_at), READONLY, "command_finished_at"},
+    {"alternate_screen_entered_at", T_LONGLONG, offsetof(Screen, alternate_screen.entered_at), READONLY, "alternate_screen_entered_at"},
+    {"alternate_screen_exited_at", T_LONGLONG, offsetof(Screen, alternate_screen.exited_at), READONLY, "alternate_screen_exited_at"},
     {"scrolled_by", T_UINT, offsetof(Screen, scrolled_by), READONLY, "scrolled_by"},
     {"pixel_scroll_offset_y", T_UINT, offsetof(Screen, pixel_scroll_offset_y), READONLY, "pixel_scroll_offset_y"},
     {"lines", T_UINT, offsetof(Screen, lines), READONLY, "lines"},

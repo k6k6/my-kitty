@@ -91,6 +91,8 @@ typedef struct {
     CPUCell *cpu_cells;
     GPUCell *gpu_cells;
     index_type xstart, ynum, xnum, cursor_x, text_len;
+    // Position of the IME cursor inside the pre-edit text in unicode code points, negative if unknown
+    int preedit_cursor;
     bool is_active;
     bool is_dirty;
     struct {
@@ -151,6 +153,15 @@ typedef struct {
     ScreenModes modes, saved_modes;
     ColorProfile *color_profile;
     monotonic_t start_visual_bell_at;
+    // Shell integration (OSC 133) command state and alternate screen
+    // changes, used by custom shaders. Times are zero until the first change.
+    struct {
+        monotonic_t started_at, finished_at;
+        bool running;
+    } command_state;
+    struct {
+        monotonic_t entered_at, exited_at;
+    } alternate_screen;
     monotonic_t start_drag_overlay_at; // 0 = inactive
     uint8_t drag_overlay_quadrant;     // 1=left 2=right 3=top 4=bottom 0=none
 
@@ -354,7 +365,7 @@ void screen_report_size(Screen *, unsigned which, unsigned modifier);
 void screen_manipulate_title_stack(Screen *, unsigned int op, unsigned int which);
 bool screen_is_overlay_active(Screen *self);
 index_type screen_overlay_line_start(const Screen *self);
-void screen_update_overlay_text(Screen *self, const char *utf8_text);
+void screen_update_overlay_text(Screen *self, const char *utf8_text, int preedit_cursor);
 bool screen_ime_text_around_cursor(Screen *self, char **before, char **after);
 void screen_set_key_encoding_flags(Screen *self, uint32_t val, uint32_t how);
 void screen_push_key_encoding_flags(Screen *self, uint32_t val);
